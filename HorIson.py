@@ -31,7 +31,6 @@ print(os.getcwd())
 #%%
 
 composition=str(Path(basedir,"CartMFP_test_mass_CASMI2022.tsv" )) #file,folder or composition string
-composition="E:/Data/Leuven/Negative ion mode/Processing pipeline/Peak_detection/CartMFP_241113_LDIneg_SlideX-and-blankITO_50-1500_laser50_8M_0_0_C16_000001_peaks.tsv"
 isotope_table=str(Path(basedir, "isotope_table.tsv"))             # table containing isotope metadata in .tsv format
 Output_folder=str(Path(basedir, "HorIson_Output"))             # table containing isotope metadata in .tsv format
 Output_file=""

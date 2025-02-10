@@ -31,11 +31,12 @@ print(os.getcwd())
 #%%
 
 composition=str(Path(basedir,"CartMFP_test_mass_CASMI2022.tsv" )) #file,folder or composition string
+composition="E:/Data/Leuven/Negative ion mode/Processing pipeline/Peak_detection/CartMFP_241113_LDIneg_SlideX-and-blankITO_50-1500_laser50_8M_0_0_C16_000001_peaks.tsv"
 isotope_table=str(Path(basedir, "isotope_table.tsv"))             # table containing isotope metadata in .tsv format
 Output_folder=str(Path(basedir, "HorIson_Output"))             # table containing isotope metadata in .tsv format
 Output_file=""
 
-method="multi" #"fft" #Options: fft, fft_hires, multi
+method="fft" #Options: fft, fft_hires, multi
 normalize=False #Options: False, sum, max
 min_intensity=1e-6
 
@@ -60,7 +61,7 @@ if not hasattr(sys,'ps1'): #checks if code is executed from command line
                         description='isotope simulation tool, see: https://github.com/hbckleikamp/HorIson')
     
     #filepaths
-    parser.add_argument("-c", "--composition",       required = False, default=str(Path(basedir, "test_mass_CASMI2022.txt")),
+    parser.add_argument("-i", "--composition",       required = False, default=str(Path(basedir, "CartMFP_test_mass_CASMI2022.tsv")),
                         help="Required: input composition string, or tabular file with elemental compositions, or folder with files")
 
     parser.add_argument("--isotope_table",       required = False, default=str(Path(basedir, "isotope_table.tsv")),
@@ -72,8 +73,8 @@ if not hasattr(sys,'ps1'): #checks if code is executed from command line
     parser.add_argument("--Output_file",       required = False, default="", help="Optional: Output file name")
     
     
-    parser.add_argument("--method",       required = False, default=str(Path(basedir, "isotope_table.tsv")),
-                        help="Optional: path to isotope table")
+    parser.add_argument("--method",       required = False, default="fft",
+                        help="Optional: isotopic modelling method")
     
     parser.add_argument("-n,--normalize",       required = False, default=False,
                         help="Optional: normalize the output (Options: don't normalize (False), normalize to total ('sum'), normalize to most abundant isotope ('max')")
@@ -204,7 +205,11 @@ def fft_lowres(form,bins=False,min_intensity=1e-6,return_borders=False): #,norma
     if not bins:
         N=max(2*abs(mono_mass-avg_mass).max(),50)
         bins=2**math.ceil(math.log2(N))
+        
+        print("number of bins: " +str(bins))
     pad=bins-len(l_iso.columns)
+    
+    
     
     #pad and fft shift negative ions
     l_iso[l_iso.columns.max()+np.arange(1,pad+1)]=0
@@ -212,24 +217,30 @@ def fft_lowres(form,bins=False,min_intensity=1e-6,return_borders=False): #,norma
     l_iso=l_iso[l_iso.columns[l_iso.columns>=0].tolist()+l_iso.columns[l_iso.columns<0].tolist()]
     
     #fft 
-    one=np.ones([len(form),len(l_iso.columns)])*complex(1, 0) 
-    for e in range(len(elements)):
-        one*=np.fft.fft(l_iso.iloc[e,:])**form[:,e].reshape(-1,1)
-    baseline=np.fft.ifft(one).real
-    
-    #output
-    q=baseline<min_intensity
-    maxn,maxp=-np.argmax(q[:,::-1],axis=1).max(),np.argmax(q,axis=1).max()
-    
-    if not return_borders:
+    bdfs=[]
+    maxns,maxps=[],[]
+    forms=np.array_split(form,np.arange(0,len(form),int(batch_size))[1:])
+    for batch,form_batch in enumerate(forms):
+        print("batch: "+str(batch))
+        
+        one=np.ones([len(form),len(l_iso.columns)])*complex(1, 0) 
+        for e in range(len(elements)):
+            one*=np.fft.fft(l_iso.iloc[e,:])**form[:,e].reshape(-1,1)
+        baseline=np.fft.ifft(one).real
+            
+        q=baseline<min_intensity
+        maxn,maxp=-np.argmax(q[:,::-1],axis=1).max(),np.argmax(q,axis=1).max()
         if maxn<0: bdf=pd.DataFrame(np.hstack([baseline[:,maxn:],baseline[:,:maxp]]),columns=np.arange(maxn,maxp))
         else:      bdf=pd.DataFrame(baseline[:,:maxp],columns=np.arange(maxn,maxp)) 
-        
-        if normalize=="sum": bdf=bdf.divide(bdf.sum(axis=1),axis=0)
-        if normalize=="max": bdf=bdf.divide(bdf.max(axis=1),axis=0)
+        bdfs.append(bdf)
+        maxns.append(maxn)
+        maxps.append(maxp)
     
-    #  #%% test
-    if return_borders: return maxn,maxp
+    bdfs=pd.concat(bdfs).fillna(0)
+    if normalize=="sum": bdfs=bdfs.divide(bdfs.sum(axis=1),axis=0)
+    if normalize=="max": bdfs=bdfs.divide(bdfs.max(axis=1),axis=0)
+
+    if return_borders: return min(maxns),max(maxps)
     return bdf
 
 #FFT with resolution
@@ -555,7 +566,7 @@ for cix,c in enumerate(composition):
     
     mono_mass=(form*tables[tables["Standard Isotope"]].set_index("symbol").loc[elements,"Relative Atomic Mass"].values).sum(axis=1)
     rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
-    avg_mass=(form*rel_mass.groupby(rel_mass.index).sum().values.flatten()).sum(axis=1)
+    avg_mass=(form*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1)
 
     #read resolution input
     fwhm=peak_fwhms[cix]
@@ -565,10 +576,12 @@ for cix,c in enumerate(composition):
         
         if len(fwhm)==len(avg_mass): fwhm=fwhm["fwhm"].tolist()
         else: fwhm=np.interp(avg_mass,fwhm["mz"],fwhm["fwhm"])
-        
+
     if method=="fft":         res=fft_lowres (form,min_intensity=min_intensity)
     if method=="fft_hires":   res=fft_highres(form,peak_fwhm=fwhm)
     if method=="multi":       res=multi_conv(form,peak_fwhm=fwhm)
+    
+    print("Writing output: "+str(Outpath))
     res.to_csv(Outpath,sep="\t")
 
 

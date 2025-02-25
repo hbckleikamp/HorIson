@@ -35,7 +35,7 @@ isotope_table=str(Path(basedir, "isotope_table.tsv"))             # table contai
 Output_folder=str(Path(basedir, "HorIson_Output"))             # table containing isotope metadata in .tsv format
 Output_file=""
 
-method="fft" #Options: fft, fft_hires, multi
+method="multi" #Options: fft, fft_hires, multi
 normalize=False #Options: False, sum, max
 min_intensity=1e-6
 
@@ -43,6 +43,7 @@ min_intensity=1e-6
 batch_size=1e4  #batch size used in fft hires
 peak_fwhm=0.01  #used in fft_hires and convolve functions
 
+prune=1e-6
 min_chance=1e-4 #
 convolve=True
 isotope_range=[-2,6] #low, high
@@ -90,8 +91,10 @@ if not hasattr(sys,'ps1'): #checks if code is executed from command line
     parser.add_argument('--convolve', action='store_true',help="Multinomial only: convolve multinomial output with gaussian")
     parser.add_argument("--isotope_range",       required = False, default=[-2,6],
                         help="Multinomial only: isotopes computed in multinomial" )
-    parser.add_argument("--min_chance",       required = False, default=1e4,
-                        help="Multinomial only: pruning combinations below x chance of occurring" )
+    parser.add_argument("--prune",       required = False, default=1e6,
+                        help="Multinomial only: pruning combinations below x chance of occurring (after during element combination)" )
+    parser.add_argument("--min_chance",       required = False, default=1e6,
+                        help="Multinomial only: pruning combinations below x chance of occurring (after element combination)" )
     
     
     
@@ -295,7 +298,7 @@ def fft_highres(form,peak_fwhm,extend=0.5,dummy=1000): #,batch_size=1e4,min_inte
     
     return bdfs
 
-def multi_conv(form,peak_fwhm): #min_chance=1e-4,convolve=False,isotope_range=np.arange(-2,7)
+def multi_conv(form,peak_fwhm): #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
 
     print("Multinomial prediction")
     
@@ -309,16 +312,45 @@ def multi_conv(form,peak_fwhm): #min_chance=1e-4,convolve=False,isotope_range=np
     ni=ni[~ni["Standard Isotope"]].reset_index() #no 0
     ni.index+=1 
 
-    kdf=[]
-    for i in np.arange(0,isotope_range.max()+1):
-        kdf.append(pd.DataFrame(list(combinations_with_replacement(ni.index.tolist(), i))))
-        #Future: add pruning!
 
-    kdf=pd.concat(kdf).reset_index(drop=True).fillna(0)
-    c=kdf.apply(Counter,axis=1)
-    kdf=pd.DataFrame(c.values.tolist()).fillna(0)
-    kdf.columns=kdf.columns.astype(int)
-    if 0 in kdf.columns: kdf.pop(0) #no 0
+    #No pruning during combinations
+    if not prune:
+        kdf=[]
+        for i in np.arange(0,isotope_range.max()+1):
+            kdf.append(pd.DataFrame(list(combinations_with_replacement(ni.index.tolist(), i))))
+        kdf=pd.concat(kdf).reset_index(drop=True).fillna(0)
+        c=kdf.apply(Counter,axis=1)
+        kdf=pd.DataFrame(c.values.tolist()).fillna(0)
+        
+        kdf.columns=kdf.columns.astype(int)
+        if 0 in kdf.columns: kdf.pop(0) #no 0
+
+    #pruning during combinations
+    if prune:
+        cs=ni[['Isotopic  Composition']].values
+        ixs=[np.arange(len(ni)).reshape(-1,1)]
+        while True:
+            v=cs.reshape(-1,1)*cs.reshape(1,-1)
+            q=v>prune
+            aq=np.argwhere(q)
+            cs=v[q].flatten()
+            
+            if not len(cs): break
+            ixs.append(np.hstack([ixs[-1]      [aq[:,0]],
+                                  ixs[-1][:,-1][aq[:,1]].reshape(-1,1)]))
+    
+        #convert to kdf format.
+        kdf=[]
+        for i in ixs:
+            c=pd.DataFrame(i).apply(Counter,axis=1)
+            kdf.append(pd.DataFrame(c.values.tolist()).fillna(0))
+            
+        kdf=pd.concat(kdf).fillna(0).astype(int)
+        kdf.index=np.arange(1,len(kdf)+1)
+        kdf.loc[0,:]=0
+        kdf.columns=ni.index
+        kdf=kdf.sort_index()
+        
 
     kdfc=kdf.columns
     kdf=kdf[kdf.columns.sort_values()]
@@ -411,11 +443,12 @@ def multi_conv(form,peak_fwhm): #min_chance=1e-4,convolve=False,isotope_range=np
     multi_df.index=np.repeat(np.arange(len(form)),[len(i) for i in multi_preds])
     multi_df["isotope"]=kdf.loc[multi_df["isotope"].astype(int),"iso_string"].values
 
+
     if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm)
     
     if normalize=="sum": multi_df["abundance"]/multi_df.groupby(res.index)["abundance"].transform("sum")
     if normalize=="max": multi_df["abundance"]/multi_df.groupby(res.index)["abundance"].transform("max")
-    
+    #%%
     return multi_df     
 
 

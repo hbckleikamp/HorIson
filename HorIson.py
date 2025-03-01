@@ -38,15 +38,17 @@ Output_file=""
 method="multi" #Options: fft, fft_hires, multi
 normalize=False #Options: False, sum, max
 min_intensity=1e-6
+isotope_range=[-2,6] #low, high
+
 
 #method specific argument
 batch_size=1e4  #batch size used in fft hires
 peak_fwhm=0.01  #used in fft_hires and convolve functions
+prune=1e-6      #multinomial specific: pruning during combinations
+min_chance=1e-4 #multinomial specific: pruning after  combinations
 
-prune=1e-6
-min_chance=1e-4 #
 convolve=True
-isotope_range=[-2,6] #low, high
+
 
 
 #%%
@@ -299,13 +301,14 @@ def fft_highres(form,peak_fwhm,extend=0.5,dummy=1000): #,batch_size=1e4,min_inte
     return bdfs
 
 def multi_conv(form,peak_fwhm): #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
-
+#%%
     print("Multinomial prediction")
     
     #####  1.  Composition space   #####
     edf=pd.DataFrame(np.vstack([form.min(axis=0),form.max(axis=0)]).T,index=elements)
     edf.columns=["low","high"]
     edf["arr"]=[np.arange(i[0],i[1]+1) for i in edf.values]
+    lim=edf[["low","high"]].reset_index(names="symbol").drop_duplicates().set_index("symbol").astype(int)
     
     #Isotope combinations
     ni=tables[tables.symbol.isin(edf.index)].reset_index() #get all isotopes
@@ -313,7 +316,7 @@ def multi_conv(form,peak_fwhm): #min_chance=1e-6,prune=1e-6, convolve=False,isot
     ni.index+=1 
 
 
-    #No pruning during combinations
+    #### No pruning during combinations
     if not prune:
         kdf=[]
         for i in np.arange(0,isotope_range.max()+1):
@@ -325,20 +328,54 @@ def multi_conv(form,peak_fwhm): #min_chance=1e-6,prune=1e-6, convolve=False,isot
         kdf.columns=kdf.columns.astype(int)
         if 0 in kdf.columns: kdf.pop(0) #no 0
 
-    #pruning during combinations
+
+
+    #### Pruning during combinations
     if prune:
-        cs=ni[['Isotopic  Composition']].values
+       
+        #initialize
+        cs=ni[['Isotopic  Composition']].values       
+        el_ix=ni[['Isotopic  Composition']].values.T 
+        els=ni["symbol"]
         ixs=[np.arange(len(ni)).reshape(-1,1)]
+
+        ecounts=[]
         while True:
-            v=cs.reshape(-1,1)*cs.reshape(1,-1)
-            q=v>prune
-            aq=np.argwhere(q)
-            cs=v[q].flatten()
+            v=cs.reshape(-1,1)*el_ix
             
+            #filter on minimum chance
+            aq=np.argwhere(v>prune)
+            if not len(aq): break
+            
+            #unique combinations
+            i=np.hstack([ixs[-1][aq[:,0]],aq[:,1].reshape(-1,1)])
+            idf=pd.DataFrame(pd.DataFrame(i).apply(Counter,axis=1).values.tolist()).fillna(0).astype(int).T.sort_index()
+            idf=idf.T.drop_duplicates().T
+            
+            ue=np.unique(idf.index)
+            el_ix=ni.loc[ue+1,'Isotopic  Composition'].values.reshape(1,-1) #update el_ix
+            els=ni.loc[ue+1,"symbol"].values                                #update els
+            
+            #filter on isotope range
+            if (len(isotope_range)) & (ni["delta neutrons"].min()>0):  
+                q_isotope_range=(idf*ni["delta neutrons"].values[[ue]].T).sum(axis=0).isin(isotope_range)
+                idf=idf.T[q_isotope_range].T
+            
+            #filter on element counts
+            idf.index=els
+            idf=idf.groupby(idf.index).sum() 
+            ilim=lim.loc[idf.index,"high"].values
+            qs=np.vstack([i<=ilim[ix] for ix,i in enumerate(idf.values)]).all(axis=0)
+
+            qx=idf.columns[qs].values
+            aqq=aq[qx]
+        
+            cs=v[aqq[:,0],aqq[:,1]] #update cs
+            print(len(qx))
             if not len(cs): break
-            ixs.append(np.hstack([ixs[-1]      [aq[:,0]],
-                                  ixs[-1][:,-1][aq[:,1]].reshape(-1,1)]))
-    
+            ixs.append(i[qx])
+            
+            
         #convert to kdf format.
         kdf=[]
         for i in ixs:
@@ -350,7 +387,6 @@ def multi_conv(form,peak_fwhm): #min_chance=1e-6,prune=1e-6, convolve=False,isot
         kdf.loc[0,:]=0
         kdf.columns=ni.index
         kdf=kdf.sort_index()
-        
 
     kdfc=kdf.columns
     kdf=kdf[kdf.columns.sort_values()]
@@ -445,7 +481,6 @@ def multi_conv(form,peak_fwhm): #min_chance=1e-6,prune=1e-6, convolve=False,isot
 
 
     if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm)
-    
     if normalize=="sum": multi_df["abundance"]/multi_df.groupby(res.index)["abundance"].transform("sum")
     if normalize=="max": multi_df["abundance"]/multi_df.groupby(res.index)["abundance"].transform("max")
     #%%

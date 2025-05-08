@@ -1,9 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Jan 21 16:43:47 2025
-
-@author: hkleikamp
-"""
 #%%
 import os
 import sys
@@ -236,6 +230,10 @@ def fft_lowres(form,bins=False,min_intensity=1e-6,return_borders=False): #,norma
         maxn,maxp=-np.argmax(q[:,::-1],axis=1).max(),np.argmax(q,axis=1).max()
         if maxn<0: bdf=pd.DataFrame(np.hstack([baseline[:,maxn:],baseline[:,:maxp]]),columns=np.arange(maxn,maxp))
         else:      bdf=pd.DataFrame(baseline[:,:maxp],columns=np.arange(maxn,maxp)) 
+        
+        if len(isotope_range): #only keep selected isotopes in output
+            bdf=bdf.iloc[:,np.round(bdf.columns,0).astype(int).isin(isotope_range)]
+        
         bdfs.append(bdf)
         maxns.append(maxn)
         maxps.append(maxp)
@@ -291,12 +289,29 @@ def fft_highres(form,peak_fwhm,extend=0.5,dummy=1000): #,batch_size=1e4,min_inte
         
         #only keep above treshold
         bdf=pd.DataFrame(baseline,columns=m_iso.columns)
-        bdfs.append(bdf.iloc[:,np.argwhere(np.any(bdf>min_intensity,axis=0))[:,0]])
+        
+        if len(isotope_range): #only keep selected isotopes in output
+            bdf=bdf.iloc[:,np.round(bdf.columns,0).astype(int).isin(isotope_range)]
+
+        
+        if normalize=="sum": bdf=bdf.divide(bdf.sum(axis=1),axis=0)
+        if normalize=="max": bdf=bdf.divide(bdf.max(axis=1),axis=0)
+        
+        bdf[bdf<min_intensity]=0
+        bdfs.append(bdf.iloc[:,np.argwhere(np.any(bdf>0,axis=0))[:,0]])
+        
+
     
     bdfs=pd.concat(bdfs).fillna(0).T.sort_index().T.reset_index(drop=True)
     bdfs.columns=np.round(bdfs.columns,4)
-    if normalize=="sum": bdfs=bdfs.divide(bdfs.sum(axis=1),axis=0)
-    if normalize=="max": bdfs=bdfs.divide(bdfs.max(axis=1),axis=0)
+    
+    
+    
+    
+
+    
+
+    
     
     return bdfs
 
@@ -587,6 +602,8 @@ else:
     tables=pd.read_csv(isotope_table,sep="\t")
     
 all_elements=list(set(tables.symbol))
+
+
 
 
 

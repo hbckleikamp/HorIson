@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 21 16:43:47 2025
+
+@author: hkleikamp
+"""
 #%%
 import os
 import sys
@@ -34,13 +40,11 @@ normalize=False #Options: False, sum, max
 min_intensity=1e-6
 isotope_range=[-2,6] #low, high
 
-
-#method specific argument
+#method specific arguments
 batch_size=1e4  #batch size used in fft hires
 peak_fwhm=0.01  #used in fft_hires and convolve functions
 prune=1e-6      #multinomial specific: pruning during combinations
 min_chance=1e-4 #multinomial specific: pruning after  combinations
-
 convolve=True
 
 
@@ -187,13 +191,60 @@ def read_table(tabfile, *,
 
     return True,tab
 
+
+
+def read_formulas(form): #either a single string or a DataFrame with element columns
+    if type(form)==str: form=parse_form(form)  #single string
+    
+    
+    elif  not isinstance(form, pd.DataFrame): #DataFrame with columns (recommended input)
+        form=pd.concat([parse_form(f) for f in form]).reset_index(drop=True).fillna(0)  
+        
+    elements=form.columns
+    form=form.values.astype(int)
+    mono_mass=(form*tables[tables["Standard Isotope"]].set_index("symbol").loc[elements,"Relative Atomic Mass"].values).sum(axis=1)
+    rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
+    avg_mass=(form*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1)
+    return form,elements,mono_mass,rel_mass,avg_mass
+
+def read_resolution(fwhms,avg_mass): #input is either a file or numeric value
+
+    if not is_float(fwhms): 
+        check,fwhms=read_table(fwhms,Keyword="fwhm")
+        if not check: 
+            print("incorrect fwhm file format! (Table requires columns 'mz','fwhm')  Skipping file: "+c)
+            print("using base default fwhm: 0.001")
+            return np.array([0.001])
+
+    else: return np.repeat(fwhms,len(avg_mass))            
+ 
+    if isinstance(fwhms,pd.DataFrame):
+        if len(fwhms)==len(avg_mass): fwhms=fwhms["fwhm"].values
+        else: fwhms=np.interp(avg_mass,fwhms["mz"],fwhms["fwhm"])
+        return fwhms
+
+
+       
 #%% isotope functions
 
 
-def fft_lowres(form,bins=False,min_intensity=1e-6,return_borders=False): #,normalize=False
+def fft_lowres(form,
+               
+               bins=False,
+               return_borders=False,
+               
+               
+               #general arguments
+               min_intensity=min_intensity,
+               isotope_range=isotope_range,
+               normalize=normalize,
+               batch_size=batch_size,
+               elements=[],
+               ): 
     
-    if return_borders:
-        print("Low resolution fft prediction")
+    #read input compositions
+    if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
+    if return_borders: print("Low resolution fft prediction")
     
     l_iso=tables.set_index("symbol").loc[elements].pivot(columns="delta neutrons",values='Isotopic  Composition').fillna(0)
     l_iso[list(set(np.arange(l_iso.columns.min(),l_iso.columns.max()+1))-set(l_iso.columns))]=0
@@ -203,11 +254,8 @@ def fft_lowres(form,bins=False,min_intensity=1e-6,return_borders=False): #,norma
     if not bins:
         N=max(2*abs(mono_mass-avg_mass).max(),50)
         bins=2**math.ceil(math.log2(N))
-        
         print("number of bins: " +str(bins))
     pad=bins-len(l_iso.columns)
-    
-    
     
     #pad and fft shift negative ions
     l_iso[l_iso.columns.max()+np.arange(1,pad+1)]=0
@@ -241,25 +289,37 @@ def fft_lowres(form,bins=False,min_intensity=1e-6,return_borders=False): #,norma
     bdfs=pd.concat(bdfs).fillna(0)
     if normalize=="sum": bdfs=bdfs.divide(bdfs.sum(axis=1),axis=0)
     if normalize=="max": bdfs=bdfs.divide(bdfs.max(axis=1),axis=0)
-
+#%%
     if return_borders: return min(maxns),max(maxps)
     return bdf
 
 #FFT with resolution
-def fft_highres(form,peak_fwhm,extend=0.5,dummy=1000): #,batch_size=1e4,min_intensity=1e-6,normalize=False
-    
-    print("High resolution fft prediction")
-    
-    if not is_float(peak_fwhm):
-        print("Warning: fft highres algorithm currently not compatible with multiple fhwm values, picing lowest")
-        peak_fwhm=peak_fwhm.min()
-    
+def fft_highres(form,
+                
+                extend=0.5,
+                dummy=1000,
+                
+                #general arguments
+                peak_fwhm=peak_fwhm,
+                min_intensity=min_intensity,
+                isotope_range=isotope_range,
+                normalize=normalize,
+                batch_size=batch_size,
+                elements=[]
+                
+                ): 
+    #%%
+    #read input compositions
+    if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
+    peak_fwhm=read_resolution(peak_fwhm,avg_mass)
     #peak_fwhm/=2 #(prevents round-off issues from digitize)
- 
+    
+
     #determine min number of bins (based on fast fft)
-    if type(form)==str: form=parse_form(form)
-    maxn,maxp=fft_lowres(form,return_borders=True,min_intensity=1e-6) 
-    iso_bins=np.linspace(maxn-extend,maxp+extend,int(round((maxp-maxn)/peak_fwhm,0)))
+    print("")
+    maxn,maxp=fft_lowres(pd.DataFrame(form,columns=elements), 
+                         return_borders=True,min_intensity=1e-6) 
+    iso_bins=np.linspace(maxn-extend,maxp+extend,int(np.round((maxp-maxn)/peak_fwhm.min(),0)))
     N=len(iso_bins)
     bins=2**math.ceil(math.log2(N))
     pad=bins-N
@@ -275,6 +335,10 @@ def fft_highres(form,peak_fwhm,extend=0.5,dummy=1000): #,batch_size=1e4,min_inte
     m_iso=pd.DataFrame(mi_space,index=elements)
     m_iso.columns=np.hstack([iso_bins,dummy+np.arange(pad)])
     m_iso=m_iso[m_iso.columns[m_iso.columns>=0].tolist()+m_iso.columns[m_iso.columns<0].tolist()] #zero shift
+    
+    print("")
+    print("High resolution fft prediction")
+    print("(Warning, hi-res fft only accepts a single fwhm value for now )")
     
     #batched high-res prediction
     bdfs=[]
@@ -310,13 +374,29 @@ def fft_highres(form,peak_fwhm,extend=0.5,dummy=1000): #,batch_size=1e4,min_inte
     
 
     
-
+#%%
     
     
     return bdfs
 
-def multi_conv(form,peak_fwhm): #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
-#%%
+def multi_conv(form,
+               
+               #general arguments
+               prune=prune,
+               min_chance=min_chance,
+               peak_fwhm=peak_fwhm,
+               convolve=convolve,
+               isotope_range=isotope_range,
+               normalize=normalize,
+               elements=[]
+               
+               
+               ): #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
+
+
+    if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
+    peak_fwhm=read_resolution(peak_fwhm,avg_mass)
+
     print("Multinomial prediction")
     
     #####  1.  Composition space   #####
@@ -494,17 +574,18 @@ def multi_conv(form,peak_fwhm): #min_chance=1e-6,prune=1e-6, convolve=False,isot
     multi_df.index=np.repeat(np.arange(len(form)),[len(i) for i in multi_preds])
     multi_df["isotope"]=kdf.loc[multi_df["isotope"].astype(int),"iso_string"].values
 
+    
 
-    if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm)
-    if normalize=="sum": multi_df["abundance"]/multi_df.groupby(res.index)["abundance"].transform("sum")
-    if normalize=="max": multi_df["abundance"]/multi_df.groupby(res.index)["abundance"].transform("max")
+    if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm,mono_mass)
+    if normalize=="sum": multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("sum")
+    if normalize=="max": multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("max")
     #%%
     return multi_df     
 
 
 
 
-def convolve_gauss(multi_df,peak_fwhm,divisor=10):
+def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10):
     
 
     print("Convolving multinomial with gaussian")
@@ -606,71 +687,60 @@ all_elements=list(set(tables.symbol))
 
 
 
-
-
 #%% Load input data
 
-#load composition
-if "." not in composition[0]: composition=[composition]  
-elif os.path.isdir(composition[0]): 
-    composition=[str(Path(composition,i)) for i in os.listdir(composition[0])]
-    composition.sort()
-
-
-if is_float(peak_fwhm[0]): peak_fwhms=[float(i) for i in peak_fwhm]
-elif os.path.isdir(peak_fwhm[0]): 
-    [str(Path(peak_fwhm,i)) for i in os.listdir(peak_fwhm[0])]
-    peak_fwhms.sort()
-
-if len(peak_fwhms)==1:
-    peak_fwhms=peak_fwhms*len(composition)
+if __name__=="__main__":
     
-if not os.path.exists(Output_folder): os.makedirs(Output_folder)
-
-for cix,c in enumerate(composition):
-
-    Outpath=str(Path(Output_folder,Output_file))
+    #load composition
+    if "." not in composition[0]: composition=[composition]  
+    elif os.path.isdir(composition[0]): 
+        composition=[str(Path(composition,i)) for i in os.listdir(composition[0])]
+        composition.sort()
     
-    #read composition input
-    if type(c)==list: 
-        fdf=pd.concat([parse_form(i) for i in c]).reset_index(drop=True).fillna(0)  
-        if not len(Output_file): Outpath=str(Path(Output_folder,method+"_isosim.tsv"))
-    else:             
-        if not len(Output_file): Outpath=str(Path(Output_folder,Path(c).stem+"_"+method+"_isosim.tsv"))
-        check,fdf=read_table(c,Keyword="Composition")
-        if check: fdf=pd.concat([parse_form(i) for i in fdf["Composition"].values]).reset_index(drop=True).fillna(0)   
-        else:
-            check,fdf=read_table(c,Keyword=all_elements)
-            if not check: 
-                print("incorrect composition file format! Skipping file: "+c)
-                continue
-      
-    elements=fdf.columns[fdf.columns.isin(tables.symbol)]
-    form=fdf[elements].values.astype(int)
     
-    mono_mass=(form*tables[tables["Standard Isotope"]].set_index("symbol").loc[elements,"Relative Atomic Mass"].values).sum(axis=1)
-    rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
-    avg_mass=(form*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1)
-
-    #read resolution input
-    fwhm=peak_fwhms[cix]
-    if not is_float(fwhm): 
-        check,fhwm=read_table(fwhm,Keyword="fwhm")
-        if not check: print("incorrect fwhm file format! (requires columns 'mz','fwhm')  Skipping file: "+c)
+    if is_float(peak_fwhm[0]): peak_fwhms=[float(i) for i in peak_fwhm]
+    elif os.path.isdir(peak_fwhm[0]): 
+        [str(Path(peak_fwhm,i)) for i in os.listdir(peak_fwhm[0])]
+        peak_fwhms.sort()
+    
+    if len(peak_fwhms)==1:
+        peak_fwhms=peak_fwhms*len(composition)
         
-        if len(fwhm)==len(avg_mass): fwhm=fwhm["fwhm"].tolist()
-        else: fwhm=np.interp(avg_mass,fwhm["mz"],fwhm["fwhm"])
-
-    if method=="fft":         res=fft_lowres (form,min_intensity=min_intensity)
-    if method=="fft_hires":   res=fft_highres(form,peak_fwhm=fwhm)
-    if method=="multi":       res=multi_conv(form,peak_fwhm=fwhm)
+    if not os.path.exists(Output_folder): os.makedirs(Output_folder)
     
-    print("Writing output: "+str(Outpath))
-    res.to_csv(Outpath,sep="\t")
-
-
-
-
+    for cix,c in enumerate(composition):
+    
+        Outpath=str(Path(Output_folder,Output_file))
+        
+        #read composition input
+        if type(c)==list: 
+            fdf=pd.concat([parse_form(i) for i in c]).reset_index(drop=True).fillna(0)  
+            if not len(Output_file): Outpath=str(Path(Output_folder,method+"_isosim.tsv"))
+        else:             
+            if not len(Output_file): Outpath=str(Path(Output_folder,Path(c).stem+"_"+method+"_isosim.tsv"))
+            check,fdf=read_table(c,Keyword="Composition")
+            if check: fdf=pd.concat([parse_form(i) for i in fdf["Composition"].values]).reset_index(drop=True).fillna(0)   
+            else:
+                check,fdf=read_table(c,Keyword=all_elements)
+                if not check: 
+                    print("incorrect composition file format! Skipping file: "+c)
+                    continue
+        
+    
+        elements=fdf.columns[fdf.columns.isin(tables.symbol)]
+        form=fdf[elements]
+        
+        if method=="fft":         res=fft_lowres (form)
+        if method=="fft_hires":   res=fft_highres(form,peak_fwhm=peak_fwhms[cix])
+        if method=="multi":       res=multi_conv(form ,peak_fwhm=peak_fwhms[cix])
+        
+        print("")
+        print("Writing output: "+str(Outpath))
+        res.to_csv(Outpath,sep="\t")
+    
+    
+    
+    
 
 
 

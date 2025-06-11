@@ -327,12 +327,6 @@ def fft_highres(form,
                 ): 
 
     #%%
-    #test
-    form="Ni3S3-"
-    elements=[]
-    extend=0.5
-    dummy=1000
-    pick_peaks=True
     
     #read input compositions
     if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
@@ -428,11 +422,6 @@ def multi_conv(form,
                ): #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
 #%%
 
-    # #test
-    # form=mfp[elements]
-    # elements=[]
-    # peak_fwhm=peak_fwhm
-   #%%
     if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
     peak_fwhm=read_resolution(peak_fwhm,avg_mass)
 

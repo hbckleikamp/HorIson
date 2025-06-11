@@ -20,7 +20,7 @@ from collections import Counter
 from collections.abc import Iterable
 from scipy.stats import multinomial
 from scipy.ndimage.filters import gaussian_filter1d
-from scipy.signal import find_peaks,peak_widths
+from scipy.signal import find_peaks,peak_widths,argrelmax
 
 # %% change directory to script directory (should work on windows and mac)
 
@@ -42,6 +42,8 @@ isotope_range=[-2,6] #low, high
 
 #method specific arguments
 batch_size=1e4  #batch size used in fft hires
+pick_peaks=True #fft_hires
+
 peak_fwhm=0.01  #used in fft_hires and convolve functions
 prune=1e-6      #multinomial specific: pruning during combinations
 min_chance=1e-4 #multinomial specific: pruning after  combinations
@@ -112,10 +114,14 @@ isotope_range=np.arange(int(isotope_range[0]),int(isotope_range[1])+1)
 if "," in composition: composition=[i.strip() for i in composition.split(",")]
 else: composition=[composition]
 
-if not isinstance(peak_fwhm, Iterable): peak_fwhm=[peak_fwhm]
-elif "," in peak_fwhm: peak_fwhm=[i.strip() for i in peak_fwhm.split(",")]
+# if not isinstance(peak_fwhm, Iterable): peak_fwhm=[peak_fwhm]
+# elif "," in peak_fwhm: peak_fwhm=[i.strip() for i in peak_fwhm.split(",")]
 
     
+#%% To Solve
+#fft hires has a weird +bin on mono, needs peak picking?
+#multi conv isotope range does not work 
+
 
 #%% Utility functions
 
@@ -197,7 +203,7 @@ def read_formulas(form): #either a single string or a DataFrame with element col
     if type(form)==str: form=parse_form(form)  #single string
     
     
-    elif  not isinstance(form, pd.DataFrame): #DataFrame with columns (recommended input)
+    elif  not (isinstance(form, pd.DataFrame) or isinstance(form, pd.Series)): #DataFrame with columns (recommended input)
         form=pd.concat([parse_form(f) for f in form]).reset_index(drop=True).fillna(0)  
         
     elements=form.columns
@@ -209,19 +215,29 @@ def read_formulas(form): #either a single string or a DataFrame with element col
 
 def read_resolution(fwhms,avg_mass): #input is either a file or numeric value
 
-    if not is_float(fwhms): 
-        check,fwhms=read_table(fwhms,Keyword="fwhm")
-        if not check: 
-            print("incorrect fwhm file format! (Table requires columns 'mz','fwhm')  Skipping file: "+c)
-            print("using base default fwhm: 0.001")
-            return np.array([0.001])
 
-    else: return np.repeat(fwhms,len(avg_mass))            
- 
     if isinstance(fwhms,pd.DataFrame):
         if len(fwhms)==len(avg_mass): fwhms=fwhms["fwhm"].values
         else: fwhms=np.interp(avg_mass,fwhms["mz"],fwhms["fwhm"])
         return fwhms
+
+    if isinstance(fwhms,np.ndarray) or type(fwhms)==list():
+        
+        if len(fwhms)==len(avg_mass): 
+            return fwhms
+        else:
+            print("length of supplied fhwms is not equal to length of masses!")
+
+    if not is_float(fwhms): 
+        if os.path.exists(fwhms):
+            print("FWHM filepath does not exist!")
+            check,fwhms=read_table(fwhms,Keyword="fwhm")
+            if not check: 
+                print("incorrect fwhm file format! (Table requires columns 'mz','fwhm')  Skipping file: "+c)
+         
+    print("using base default fwhm: 0.001")
+    return np.repeat(np.array([0.001]),len(avg_mass))            
+ 
 
 
        
@@ -305,28 +321,42 @@ def fft_highres(form,
                 isotope_range=isotope_range,
                 normalize=normalize,
                 batch_size=batch_size,
+                pick_peaks=pick_peaks,
                 elements=[]
                 
                 ): 
+
     #%%
+    #test
+    form="Ni3S3-"
+    elements=[]
+    extend=0.5
+    dummy=1000
+    pick_peaks=True
+    
     #read input compositions
     if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
     peak_fwhm=read_resolution(peak_fwhm,avg_mass)
-    #peak_fwhm/=2 #(prevents round-off issues from digitize)
+    peak_fwhm/=1.25 #(prevents round-off issues from digitize)
     
 
     #determine min number of bins (based on fast fft)
     print("")
     maxn,maxp=fft_lowres(pd.DataFrame(form,columns=elements), 
                          return_borders=True,min_intensity=1e-6) 
-    iso_bins=np.linspace(maxn-extend,maxp+extend,int(np.round((maxp-maxn)/peak_fwhm.min(),0)))
+    #iso_bins=np.linspace(maxn-extend,maxp+extend,int(np.round((maxp-maxn)/peak_fwhm.min(),0)))
+    
+    iso_bins=np.hstack([np.linspace(maxn-extend,0,int(np.round(maxn/peak_fwhm.min()))),
+                        np.linspace(0,maxp+extend,int(np.round(maxp/peak_fwhm.min())))])
+    #make sure isobins has zero
+    
     N=len(iso_bins)
     bins=2**math.ceil(math.log2(N))
     pad=bins-N
     
     #digitize to mass resolution
     imass=tables.set_index("symbol").loc[elements]
-    imass["col_ix"]=np.digitize(imass.delta_mass.values,iso_bins)
+    imass["col_ix"]=np.digitize(imass.delta_mass.values,iso_bins)   
     imass=imass.merge(pd.Series(np.arange(len(elements)),index=elements,name="row_ix"),how="left",right_index=True,left_index=True)
     
     #pad and fft shift negative ions
@@ -335,6 +365,7 @@ def fft_highres(form,
     m_iso=pd.DataFrame(mi_space,index=elements)
     m_iso.columns=np.hstack([iso_bins,dummy+np.arange(pad)])
     m_iso=m_iso[m_iso.columns[m_iso.columns>=0].tolist()+m_iso.columns[m_iso.columns<0].tolist()] #zero shift
+    zval=m_iso.columns[np.argmax(m_iso.sum())]
     
     print("")
     print("High resolution fft prediction")
@@ -353,29 +384,32 @@ def fft_highres(form,
         
         #only keep above treshold
         bdf=pd.DataFrame(baseline,columns=m_iso.columns)
+        bdf.columns=bdf.columns-zval #correct for binshift
         
         if len(isotope_range): #only keep selected isotopes in output
             bdf=bdf.iloc[:,np.round(bdf.columns,0).astype(int).isin(isotope_range)]
 
-        
         if normalize=="sum": bdf=bdf.divide(bdf.sum(axis=1),axis=0)
         if normalize=="max": bdf=bdf.divide(bdf.max(axis=1),axis=0)
         
         bdf[bdf<min_intensity]=0
-        bdfs.append(bdf.iloc[:,np.argwhere(np.any(bdf>0,axis=0))[:,0]])
+        if pick_peaks:
+            x,y=argrelmax(bdf.values,axis=1,mode="wrap")
+            bdfs.append(np.vstack([x,bdf.columns[y],bdf.values[x,y]]).T)
+            #would be more accurate to do integral under peak, but this would be slow
+            
+        else: bdfs.append(bdf.iloc[:,np.argwhere(np.any(bdf>0,axis=0))[:,0]])
         
 
+    if pick_peaks:
+        bdfs=pd.DataFrame(np.vstack(bdfs),columns=["ix","iso_mass","abundance"])
+    else:
+        bdfs=pd.concat(bdfs).fillna(0).T.sort_index().T.reset_index(drop=True)
+        bdfs.columns=np.round(bdfs.columns,4)
     
-    bdfs=pd.concat(bdfs).fillna(0).T.sort_index().T.reset_index(drop=True)
-    bdfs.columns=np.round(bdfs.columns,4)
     
-    
-    
-    
+    #%%
 
-    
-#%%
-    
     
     return bdfs
 
@@ -392,8 +426,13 @@ def multi_conv(form,
                
                
                ): #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
+#%%
 
-
+    # #test
+    # form=mfp[elements]
+    # elements=[]
+    # peak_fwhm=peak_fwhm
+   #%%
     if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
     peak_fwhm=read_resolution(peak_fwhm,avg_mass)
 
@@ -579,6 +618,7 @@ def multi_conv(form,
     if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm,mono_mass)
     if normalize=="sum": multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("sum")
     if normalize=="max": multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("max")
+  
     #%%
     return multi_df     
 
@@ -586,7 +626,7 @@ def multi_conv(form,
 
 
 def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10):
-    
+    #%%
 
     print("Convolving multinomial with gaussian")
 
@@ -597,9 +637,7 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10):
 
     fwhm=peak_fwhm
     if isinstance(peak_fwhm, Iterable): fwhm=min(peak_fwhm)
-    w=abs(np.array([cm.min(),cm.max()])).max()
-    if fwhm>w: w=fwhm*10
-    l,u=-w,w
+    l,u=cm.min()-fwhm*1.1,cm.max()+fwhm*1.1
     x=np.linspace(l,u,(int(np.round((u-l)/fwhm))*divisor))
     bw=np.diff(x)[0]
 
@@ -617,18 +655,24 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10):
     if isinstance(peak_fwhm, Iterable): gmat=[gaussian_filter1d(zmat[ix],sigma=divisor/2.355*peak_fwhm[i]/fwhm)*divisor for ix,i in enumerate(pred_ix[np.hstack([nz,len(m)-1])])]
     else: gmat=gaussian_filter1d(zmat,sigma=divisor/2.355)*divisor #Gaussian FWHM=2*sqrt(2ln(2)) =~ 2.355*s   #https://en.wikipedia.org/wiki/Full_width_at_half_maximum
 
+
+
     #pick peaks
     convolved_peaks=[]
     for ix,i in enumerate(gmat):
         p=find_peaks(i)
         pw=peak_widths(i,p[0])
         convolved_peaks.append(np.vstack([x[p[0]],pw[0]*bw,i[p[0]]]).T)
-        
+
+
     cpeak_df=pd.DataFrame(np.hstack([np.repeat(indices,[len(i) for i in convolved_peaks],axis=0),
                                      np.vstack(convolved_peaks)]),columns=["ix","isotope","mass","width","abundance"])
 
-    cpeak_df["mass"]+=(mono_mass[cpeak_df["ix"].astype(int)]+cpeak_df["isotope"])
+    cpeak_df["ix"]=cpeak_df["ix"].astype(int)
+    cpeak_df["mass"]+=(mono_mass[cpeak_df["ix"]]+cpeak_df["isotope"])
 
+    
+#%%
     return cpeak_df.set_index("ix")
 
 #%% Get elemental metadata
@@ -696,10 +740,9 @@ if __name__=="__main__":
     elif os.path.isdir(composition[0]): 
         composition=[str(Path(composition,i)) for i in os.listdir(composition[0])]
         composition.sort()
-    
-    
-    if is_float(peak_fwhm[0]): peak_fwhms=[float(i) for i in peak_fwhm]
-    elif os.path.isdir(peak_fwhm[0]): 
+
+    if is_float(peak_fwhm): peak_fwhms=[float(peak_fwhm)]
+    elif os.path.isdir(peak_fwhm): 
         [str(Path(peak_fwhm,i)) for i in os.listdir(peak_fwhm[0])]
         peak_fwhms.sort()
     
@@ -732,7 +775,7 @@ if __name__=="__main__":
         
         if method=="fft":         res=fft_lowres (form)
         if method=="fft_hires":   res=fft_highres(form,peak_fwhm=peak_fwhms[cix])
-        if method=="multi":       res=multi_conv(form ,peak_fwhm=peak_fwhms[cix])
+        if method=="multi":       res=multi_conv(form,peak_fwhm=peak_fwhms[cix])
         
         print("")
         print("Writing output: "+str(Outpath))

@@ -48,6 +48,8 @@ peak_fwhm=0.01  #used in fft_hires and convolve functions
 prune=1e-6      #multinomial specific: pruning during combinations
 min_chance=1e-4 #multinomial specific: pruning after  combinations
 convolve=True
+convolve_batch=1e4
+
 
 
 
@@ -84,13 +86,16 @@ if not hasattr(sys,'ps1'): #checks if code is executed from command line
     parser.add_argument("--min_intensity",       required = False, default=1e-6,
                         help="Only retain Fourier columns that have one abundance over x" )
     
-    parser.add_argument("--batch_size",       required = False, default=1e4,
+    parser.add_argument("--batch_size",       required = False, default=1e4,type=int,
                         help="FFt hires only: perform fourier transform in batches of x" )
     parser.add_argument("-fwhm, --peak_fwhm",       required = False, default=0.01,
                         help="Optional: Peak full width at half maxmium. Used in fft_hires and convolve functions. can be supplied as single value, or as a list of values corresponding to different masses." )
     
     #multinomial specific arguments
     parser.add_argument('--convolve', action='store_true',help="Multinomial only: convolve multinomial output with gaussian")
+    parser.add_argument("--convolve_batch",       required = False, default=1e4,type=int,
+                        help="Multinomial only: perform gaussian convolution in batches of x" )
+    
     parser.add_argument("--isotope_range",       required = False, default=[-2,6],
                         help="Multinomial only: isotopes computed in multinomial" )
     parser.add_argument("--prune",       required = False, default=1e6,
@@ -113,6 +118,7 @@ isotope_range=np.arange(int(isotope_range[0]),int(isotope_range[1])+1)
 
 if "," in composition: composition=[i.strip() for i in composition.split(",")]
 else: composition=[composition]
+
 
 # if not isinstance(peak_fwhm, Iterable): peak_fwhm=[peak_fwhm]
 # elif "," in peak_fwhm: peak_fwhm=[i.strip() for i in peak_fwhm.split(",")]
@@ -215,29 +221,43 @@ def read_formulas(form): #either a single string or a DataFrame with element col
 
 def read_resolution(fwhms,avg_mass): #input is either a file or numeric value
 
-
     if isinstance(fwhms,pd.DataFrame):
         if len(fwhms)==len(avg_mass): fwhms=fwhms["fwhm"].values
         else: fwhms=np.interp(avg_mass,fwhms["mz"],fwhms["fwhm"])
         return fwhms
 
-    if isinstance(fwhms,np.ndarray) or type(fwhms)==list():
+    if isinstance(fwhms,np.ndarray) or type(fwhms)==type(list()):
         
         if len(fwhms)==len(avg_mass): 
-            return fwhms
+            return np.array(fwhms)
+        
+        
         else:
             print("length of supplied fhwms is not equal to length of masses!")
+            if len(fwhms)==1:
+                print("using fwhm "+str(peak_fwhms[0])+" for all masses!")
+                return np.repeat(np.array(fwhms),len(avg_mass))   
+            else:
+                print("using base default fwhm: 0.001")
+                return np.repeat(np.array([0.001]),len(avg_mass))        
+                
 
-    if not is_float(fwhms): 
+    if is_float(fwhms): 
+        return np.repeat(np.array([fwhms]),len(avg_mass))   
+
+    else:
         if os.path.exists(fwhms):
             print("FWHM filepath does not exist!")
             check,fwhms=read_table(fwhms,Keyword="fwhm")
             if not check: 
                 print("incorrect fwhm file format! (Table requires columns 'mz','fwhm')  Skipping file: "+c)
-         
-    print("using base default fwhm: 0.001")
-    return np.repeat(np.array([0.001]),len(avg_mass))            
+           
+                    
+            print("using base default fwhm: 0.001")
+            return np.repeat(np.array([0.001]),len(avg_mass))            
  
+
+       
 
 
        
@@ -326,7 +346,6 @@ def fft_highres(form,
                 
                 ): 
 
-    #%%
     
     #read input compositions
     if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
@@ -414,16 +433,22 @@ def multi_conv(form,
                min_chance=min_chance,
                peak_fwhm=peak_fwhm,
                convolve=convolve,
+               convolve_batch=convolve_batch,
+               #add convolve batch option
                isotope_range=isotope_range,
                normalize=normalize,
                elements=[]
                
                
                ): #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
-#%%
 
+   #%%
+   
     if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
     peak_fwhm=read_resolution(peak_fwhm,avg_mass)
+    
+
+    
 
     print("Multinomial prediction")
     
@@ -602,9 +627,9 @@ def multi_conv(form,
     multi_df.index=np.repeat(np.arange(len(form)),[len(i) for i in multi_preds])
     multi_df["isotope"]=kdf.loc[multi_df["isotope"].astype(int),"iso_string"].values
 
-    
+   
 
-    if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm,mono_mass)
+    if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch)
     if normalize=="sum": multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("sum")
     if normalize=="max": multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("max")
   
@@ -614,55 +639,76 @@ def multi_conv(form,
 
 
 
-def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10):
+def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convolve_batch):
     #%%
 
     print("Convolving multinomial with gaussian")
-
-    m=multi_df.mass.values
-    pred_ix=multi_df.index.values
-    mi=np.round(m,0).astype(int)
-    cm=m-mi
-
-    fwhm=peak_fwhm
-    if isinstance(peak_fwhm, Iterable): fwhm=min(peak_fwhm)
-    l,u=cm.min()-fwhm*1.1,cm.max()+fwhm*1.1
-    x=np.linspace(l,u,(int(np.round((u-l)/fwhm))*divisor))
-    bw=np.diff(x)[0]
-
-    ux=np.vstack([pred_ix,mi]).T
-    nz=np.argwhere((np.diff(ux,axis=0)!=0).any(axis=1))[:,0]
-    uixs=np.diff(np.hstack([-1,nz,len(m)-1]))
+    if convolve_batch:
+        print("Convolve batch size: "+str(int(convolve_batch)))
     
-    zmat=np.zeros([len(uixs),len(x)]) #make sparse?
-    zmat[np.repeat(np.arange(len(uixs)),uixs),find_closest(x,cm)]=multi_df["abundance"]
+ 
+    ui=np.unique(multi_df.index)
+    if convolve_batch: batch_groups=[ui[i:i+int(convolve_batch)] for i in range(0,len(ui),int(convolve_batch))]
+    else: batch_groups=[ui]
 
-    indices=ux[np.hstack([nz,len(m)-1])]
     
+    cpeak_dfs=[]
+    t=0
+    for batch,b in enumerate(batch_groups):
+        print("batch: "+str(batch))
 
-    #convolve with gaussian
-    if isinstance(peak_fwhm, Iterable): gmat=[gaussian_filter1d(zmat[ix],sigma=divisor/2.355*peak_fwhm[i]/fwhm)*divisor for ix,i in enumerate(pred_ix[np.hstack([nz,len(m)-1])])]
-    else: gmat=gaussian_filter1d(zmat,sigma=divisor/2.355)*divisor #Gaussian FWHM=2*sqrt(2ln(2)) =~ 2.355*s   #https://en.wikipedia.org/wiki/Full_width_at_half_maximum
+        #read group
+        g=multi_df.loc[b,:]        
+        m=g.mass.values
+        pred_ix=g.index.values
+        mi=np.round(m,0).astype(int) #isotopes
+        cm=m-mi
+    
+        fwhms=peak_fwhm[t:t+len(b)]
+        ufwhms=np.unique(fwhms)
+        minfwhm=ufwhms[0]
+  
+        #constructing gaussian space
+        l,u=cm.min()-minfwhm*1.1,cm.max()+minfwhm*1.1
+        x=np.linspace(l,u,(int(np.round((u-l)/minfwhm))*divisor))
+        bw=np.diff(x)[0]
+    
+        #constructing isotope table
+        ux=np.vstack([pred_ix,mi]).T
+        group_ixs=np.hstack([0,np.argwhere(np.any(ux[:-1]!=ux[1:],axis=1))[:,0]+1])
+        uixs=np.diff(np.hstack([group_ixs,len(ux)]))
+        zmat=np.zeros([len(uixs),len(x)]) #make sparse?
+        zmat[np.repeat(np.arange(len(uixs)),uixs),find_closest(x,cm)]=g["abundance"]
+        indices=ux[group_ixs]
+        fwhms=fwhms[indices[:,0]-t]
+        
+        #convolve with gaussian 
+        #Gaussian FWHM=2*sqrt(2ln(2)) =~ 2.355*s   #https://en.wikipedia.org/wiki/Full_width_at_half_maximum
+        if len(ufwhms)==1: gmat=gaussian_filter1d(zmat,sigma=divisor/2.355)*divisor 
+        else:              gmat=[gaussian_filter1d(zmat[ix],sigma=divisor/2.355*i/minfwhm)*divisor for ix,i in enumerate(fwhms)]
+    
+        #pick peaks
+        convolved_peaks=[]
+        for ix,i in enumerate(gmat):
+            p=find_peaks(i)
+            pw=peak_widths(i,p[0])
+            convolved_peaks.append(np.vstack([x[p[0]],pw[0]*bw,i[p[0]]]).T)
+    
+    
+        cpeak_df=pd.DataFrame(np.hstack([np.repeat(indices,[len(i) for i in convolved_peaks],axis=0),
+                                         np.vstack(convolved_peaks)]),columns=["ix","isotope","mass","width","abundance"])
+    
+        cpeak_df["ix"]=cpeak_df["ix"].astype(int)
+        cpeak_df["mass"]+=(mono_mass[cpeak_df["ix"]]+cpeak_df["isotope"])
+    
+        cpeak_dfs.append(cpeak_df)
+        t+=len(b)
 
-
-
-    #pick peaks
-    convolved_peaks=[]
-    for ix,i in enumerate(gmat):
-        p=find_peaks(i)
-        pw=peak_widths(i,p[0])
-        convolved_peaks.append(np.vstack([x[p[0]],pw[0]*bw,i[p[0]]]).T)
-
-
-    cpeak_df=pd.DataFrame(np.hstack([np.repeat(indices,[len(i) for i in convolved_peaks],axis=0),
-                                     np.vstack(convolved_peaks)]),columns=["ix","isotope","mass","width","abundance"])
-
-    cpeak_df["ix"]=cpeak_df["ix"].astype(int)
-    cpeak_df["mass"]+=(mono_mass[cpeak_df["ix"]]+cpeak_df["isotope"])
+    cpeak_dfs=pd.concat(cpeak_dfs).set_index("ix")
 
     
 #%%
-    return cpeak_df.set_index("ix")
+    return cpeak_dfs
 
 #%% Get elemental metadata
 

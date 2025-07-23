@@ -125,9 +125,7 @@ else: composition=[composition]
 
     
 #%% To Solve
-#fft hires has a weird +bin on mono, needs peak picking?
-#multi conv isotope range does not work 
-
+#fft hires has a weird +bin on mono, needs a correction function based on the distance of each isotope to the nearest bin edge.
 
 #%% Utility functions
 
@@ -137,18 +135,6 @@ def is_float(x):
         return True
     except: 
         return False
-
-        
-#vectorized find nearest mass
-#https://stackoverflow.com/questions/8914491/finding-the-nearest-value-and-return-the-index-of-array-in-python
-def find_closest(A, target): #returns index of closest array of A within target
-    #A must be sorted
-    idx = A.searchsorted(target)
-    idx = np.clip(idx, 1, len(A)-1)
-    left = A[idx-1]
-    right = A[idx]
-    idx -= target - left < right - target
-    return idx
 
 #parse form
 def parse_form(form): #chemical formula parser
@@ -678,7 +664,11 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convol
         group_ixs=np.hstack([0,np.argwhere(np.any(ux[:-1]!=ux[1:],axis=1))[:,0]+1])
         uixs=np.diff(np.hstack([group_ixs,len(ux)]))
         zmat=np.zeros([len(uixs),len(x)]) #make sparse?
-        zmat[np.repeat(np.arange(len(uixs)),uixs),find_closest(x,cm)]=g["abundance"]
+        
+        g["x"]=np.repeat(np.arange(len(uixs)),uixs)
+        g["y"]=np.searchsorted(x,cm)
+        gs=g.groupby(["x","y"])["abundance"].sum().reset_index()
+        zmat[gs.x,gs.y]=gs["abundance"] 
         indices=ux[group_ixs]
         fwhms=fwhms[indices[:,0]-t]
         

@@ -616,8 +616,9 @@ def multi_conv(form,
    
 
     if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch)
-    if normalize=="sum": multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("sum")
-    if normalize=="max": multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("max")
+    if normalize=="sum": multi_df["abundance"]=multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("sum")
+    if normalize=="max": multi_df["abundance"]=multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("max")
+  
   
     #%%
     return multi_df     
@@ -818,6 +819,7 @@ if __name__=="__main__":
 
 
 #%%
+
 
 
 

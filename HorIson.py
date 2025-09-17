@@ -652,7 +652,7 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convol
     
         fwhms=peak_fwhm[t:t+len(b)]
         ufwhms=np.unique(fwhms)
-        minfwhm=np.clip(ufwhms[0],0,0.01) #put minimum peak fwhm
+        minfwhm=ufwhms[0]
   
         #constructing gaussian space
         l,u=cm.min()-minfwhm*1.1,cm.max()+minfwhm*1.1

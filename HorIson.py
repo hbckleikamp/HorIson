@@ -461,11 +461,9 @@ def fft_highres(form,
 def Precompute_multi(form,elements=None,isotope_range=isotope_range,prune=prune,min_chance=min_chance):
 
 #%%
-
-
     print("Multinomial prediction")
     
-    if type(elements)==type(None): elements=form.columns[form.columns.isin(isotope_table.symbol)].tolist()
+    if type(elements)==type(None): elements=form.columns[form.columns.isin(tables.symbol)].tolist()
     if isinstance(form,pd.DataFrame): form=form[elements]
     
     
@@ -570,7 +568,12 @@ def Precompute_multi(form,elements=None,isotope_range=isotope_range,prune=prune,
     q=iso_string=="0"
     iso_string=iso_string+kdf.columns[:-2].values+","
     iso_string[q]=""
-    iso_string=pd.Series(iso_string.sum(axis=1)).str.strip(",").values
+    
+    #return iso_string #test
+    
+
+    
+    iso_string=pd.Series(iso_string.sum(axis=1)).astype(str).str.strip(",").values
     kdf["iso_string"]=iso_string
     
     ###### 2. Precompute multinomials #######
@@ -623,7 +626,7 @@ def multi_conv(form,
                #add convolve batch option
        
                normalize=normalize,
-               elements=[],
+               elements=None,
                charge=None,
                Precomputed=Precomputed,
                verbose=verbose,
@@ -634,92 +637,90 @@ def multi_conv(form,
 
 #%%
     
-    # elements=["S",  "O",  "-"]
-    # form=g[elements] 
-    # #form="SO3-"
-    # elements=""
-    # peak_fwhm=w
+    # form=cmfp
+    # Precomputed=[]
+    
+    # form=b
     # Precomputed=precomputed
-
-    # form=mf[elements]
-    # charge=None
-    # Precomputed=precomputed
-    # elements=elements
-    # isotope_range=[]
-    # prune=1e-4
-    # peak_fwhm=np.interp(mf.input_mass,xres,yres)
-    # normalize="mono"
-
-    #specifically test multi_df.loc[[57258,57260,57264],:]
-
+    
     # elements=[]
-    # form=fdf[['H', 'C', 'N', 'O', 'P', 'S', 'K', 'Na']]
-
-    # form="Ni3S3"
-    # elements=[]
-    # normalize="mono"
-    # isotope_range=[]
-    # prune=1e-4
-    # peak_fwhm=np.array([0.00116524])
     # charge=1
+    # isotope_range=[]
 
-    ### parse charge
-    if type(charge)!=type(None):    
-        charge=np.array(charge).reshape(-1,1).flatten()
-        if (len(charge)==1) & (type(form)!=str): charge=np.repeat(charge,len(form))
-    if isinstance(form,pd.DataFrame):
-        if type(charge)==type(None):
+    # form=b  #mf[elements]
+    # elements=mf_elements #elements=elements,
+    # peak_fwhm=np.interp(b.input_mass,xres,yres)
+    # Precomputed=precomputed
+    # normalize="mono"
+    # verbose=False
+    # isotope_range=[]
+    # prune=1e-4
+    # charge=None
+
+    # form=cmfp
+    # Precomputed=[]
+    # isotope_range=[]
+    # elements=None
+    # charge=None
+    # peak_fwhm=np.interp(form.input_mass,xres,yres)
+
+    ## parse charge
+    if type(charge)==type(None):
+        if isinstance(form,pd.DataFrame): #attempt to read from dataframe
             if "charge" in form.columns.str.lower():
                 print("charge detected, dividing output masses by charge")
-                charge=form.iloc[:,np.argwhere(form.columns.str.lower()=="charge")[0]].values
+                cc=np.argwhere(form.columns.str.lower()=="charge")[0][0]
+                charge=form.iloc[:,cc].astype(int).values
+        else: charge=1
+            
+            
     
-
-    if not len(elements):
-    
-
+    ## parse formula   
+    if type(elements)==type(None):
+        
         if type(form)==str: form=parse_form(form)  #single string
         elif  not (isinstance(form, pd.DataFrame) or isinstance(form, pd.Series)): #iterable
-            form=pd.concat([parse_form(f) for f in form]).reset_index(drop=True).fillna(0)  
+            form=pd.concat([parse_form(f) for f in form]).reset_index(drop=True).fillna(0)          
+        if isinstance(form, pd.DataFrame): #DataFrame with columns (recommended input)        
+            elements=form.columns[form.columns.isin(mono_elmass.index)].tolist()
+            
+    form=form[elements]
+    elements=form.columns.tolist()
 
-        #DataFrame with columns (recommended input)
-        elif isinstance(form, pd.DataFrame):        
-            if not len(elements):
-                elements=form.columns[form.columns.isin(mono_elmass.index)].tolist()
-            form=form[elements]
-        
-        elements=form.columns.tolist()
-
-    
+    ## parse charge
     if type(charge)!=type(None):
-        if "-" in elements: form["-"]*=charge
-        if "+" in elements: form["+"]*=charge
+        charge=np.array(charge).reshape(-1,1).flatten()
+        if (len(charge)==1) & (type(form)!=str): charge=np.repeat(charge,len(form))
+        if "-" in elements:
+            if np.all(form["-"]==1): form["-"]*=charge
+        
+        if "+" in elements:
+            if np.all(form["+"]==1): form["+"]*=charge
+
         
     
-    #detect index:
+    ## detect index:
     xx=np.arange(len(form))
     if (isinstance(form, pd.DataFrame) or isinstance(form, pd.Series)): xx=form.index
        
-    
+    ## calculate mass
     mono_mass=(form*mono_elmass.loc[elements].values).sum(axis=1).values
     rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
     avg_mass=(form[elements]*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1).values
     form=form.values.astype(int)
     
+    ## parse charge
     if "-" in elements or "+" in elements:
         z=np.zeros((len(form),1))
         if "-" in elements: z+=form[:,np.argwhere(np.array(elements)=="-")[0]]
         if "+" in elements: z+=form[:,np.argwhere(np.array(elements)=="+")[0]]
         charge=z.flatten().astype(int)        
     if type(charge)!=type(None): mono_mass,avg_mass=mono_mass/charge,avg_mass/charge
-        
-    
+    peak_fwhm=read_resolution(peak_fwhm,avg_mass)    
 
-    # if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form,charge=charge)
-    # else:                 form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form,charge=charge,elements=elements)
-        
-    
-    peak_fwhm=read_resolution(peak_fwhm,avg_mass)
-    
+    # test=Precompute_multi(form,elements=elements,isotope_range=isotope_range,prune=prune,min_chance=min_chance)
+    # return test,{"form":form,"elements":elements,"isotope_range":isotope_range,"prune":prune,"min_chance":min_chance}
+
     if len(Precomputed): earrs,m_ecounts,uif,uis,kdf_mass,kdf=Precomputed
     else:                earrs,m_ecounts,uif,uis,kdf_mass,kdf=Precompute_multi(form,
                                                                                elements=elements,
@@ -740,6 +741,13 @@ def multi_conv(form,
         
         qf=np.argwhere(uri==ixr)[:,0]
         bf=form[qf]
+        
+        # #%% test
+        # for eix,e in enumerate(earrs):
+        #     if len(earrs[eix]):
+        #         earrs[eix][m_ecounts[eix][bf[:,eix]]]
+        
+    
    
         chances=np.hstack([earrs[eix][m_ecounts[eix][bf[:,eix]]]  for eix,e in enumerate(earrs) if len(earrs[eix])])
         chances[chances<min_chance]=0
@@ -773,6 +781,7 @@ def multi_conv(form,
     if normalize=="max": multi_df["abundance"]=multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("max")
 
     multi_df.index=xx[multi_df.index]
+    #%%
     return multi_df     
 
 

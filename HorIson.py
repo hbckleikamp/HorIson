@@ -454,7 +454,7 @@ def fft_highres(form,
     #read input compositions
     if not len(elements): form,elements,charge,mono_mass,rel_mass,avg_mass=read_formulas(form)
     else:
-        mono_mass=(form*mono_elmass.loc[elements].values).sum(axis=1).values
+        mono_mass=(form[elements]*mono_elmass.loc[elements].values).sum(axis=1).values
         rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
         avg_mass=(form[elements]*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1).values
         elements=list(set(elements)-set(("+","-")))
@@ -807,6 +807,12 @@ def multi_conv(form,
     # peak_fwhm=0.00048824
     # convolve="full"
 
+    # form=b
+    # precomp=precomputed
+    # elements=mf_elements
+    # charge=None
+
+
     ## parse charge
     if type(charge)==type(None):
         if isinstance(form,pd.DataFrame): #attempt to read from dataframe
@@ -827,7 +833,7 @@ def multi_conv(form,
         if isinstance(form, pd.DataFrame): #DataFrame with columns (recommended input)        
             elements=form.columns[form.columns.isin(mono_elmass.index)].tolist()
     else:
-        mono_mass=(form*mono_elmass.loc[elements].values).sum(axis=1).values
+        mono_mass=(form[elements]*mono_elmass.loc[elements].values).sum(axis=1).values
         rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
         avg_mass=(form[elements]*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1).values
         

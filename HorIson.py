@@ -30,28 +30,38 @@ print(os.getcwd())
 
 #%%
 
+# general arguments
 composition=str(Path(basedir,"CartMFP_test_mass_CASMI2022.tsv" )) #file,folder or composition string
 isotope_table=str(Path(basedir, "isotope_table.tsv"))             # table containing isotope metadata in .tsv format
 Output_folder=str(Path(basedir, "HorIson_Output"))             # table containing isotope metadata in .tsv format
 Output_file=""
 
 method="multi" #Options: fft, fft_hires, multi
-normalize=False #Options: False, sum, max
+normalize=False #Options: False, sum, max, mono
 min_intensity=1e-6
 isotope_range=[-2,6] #low, high
 
-#method specific arguments
+#### method specific arguments
+
+#used in fft_hires and convolve functions
+pick_peaks=True 
+peak_fwhm=0.01      
+add_mono=True       #add monoisotopic mass back
+correct_charge=True #divide by charge to m/z output
+
+#fft specific
+packing=True
+mass_shift=True
 batch_size=1e4  #batch size used in fft hires
-pick_peaks=True #fft_hires
 
-peak_fwhm=0.01  #used in fft_hires and convolve functions
-prune=1e-6      #multinomial specific: pruning during combinations
-min_chance=1e-4 #multinomial specific: pruning after  combinations
-convolve=True
+
+#multinomial specific
+prune=1e-6      #pruning during combinations
+min_chance=1e-4 #pruning after  combinations
+convolve="fast" #False (no convolution) "fast" (output peaks) or "full" (output complete)
 convolve_batch=1e4
-Precomputed=[] #precompute multinomial arrays for subsequent function calls
+Precomputed=[] #
 verbose=True #print messages or not?
-
 
 #%%
 
@@ -81,7 +91,7 @@ if not hasattr(sys,'ps1'): #checks if code is executed from command line
                         help="Optional: isotopic modelling method")
     
     parser.add_argument("-n,--normalize",       required = False, default=False,
-                        help="Optional: normalize the output (Options: don't normalize (False), normalize to total ('sum'), normalize to most abundant isotope ('max')")
+                        help="Optional: normalize the output (Options: don't normalize (False), normalize to total ('sum'), normalize to most abundant isotope ('max'), normalize to monoisotopic peak (mono)")
     
     parser.add_argument("--min_intensity",       required = False, default=1e-6,
                         help="Only retain Fourier columns that have one abundance over x" )
@@ -91,8 +101,21 @@ if not hasattr(sys,'ps1'): #checks if code is executed from command line
     parser.add_argument("-fwhm, --peak_fwhm",       required = False, default=0.01,
                         help="Optional: Peak full width at half maxmium. Used in fft_hires and convolve functions. can be supplied as single value, or as a list of values corresponding to different masses." )
     
+    parser.add_argument("--packing",       required = False, default=True,
+                        help="FFt hires only: pack ffts for faster computation" )
+    parser.add_argument("--bpick_peaks",       required = False,  default=True,
+                        help="FFt hires only: retain peaks only" )
+    parser.add_argument("--add_mono",       required = False, default=True,
+                        help="Add back monoisotopic mass" )
+    parser.add_argument("--correct_charge",       required = False,  default=True,
+                        help="Correct with charge to m/z" )
+    
+
+
+    
     #multinomial specific arguments
-    parser.add_argument('--convolve', action='store_true',help="Multinomial only: convolve multinomial output with gaussian")
+    #parser.add_argument('--convolve', action='store_true',help="Multinomial only: convolve multinomial output with gaussian")
+    parser.add_argument('--convolve', default="fast",help="Multinomial only: convolve multinomial output with gaussian")
     parser.add_argument("--convolve_batch",       required = False, default=1e4,type=int,
                         help="Multinomial only: perform gaussian convolution in batches of x" )
     
@@ -154,10 +177,13 @@ def parse_form(form): #chemical formula parser
     cdf=pd.DataFrame(comps,columns=["elements","counts"]).set_index("elements").T.astype(int)
     
     #add charge
-    if form[-1]=="+": cdf["+"]=1
-    if form[-1]=="-": cdf["-"]=1
-    
+    cdf["+"]=form.count("+")
+    cdf["-"]=form.count("-")
     return cdf
+
+def getMz(form): #this could be vectorized for speed up in the future
+    cdf=parse_form(form)
+    return (cdf.values*mono_elmass.loc[cdf.columns].values).sum() / cdf[["+","-"]].sum(axis=1)
 
 # read input table (dynamic delimiter detection)
 def read_table(tabfile, *,
@@ -194,20 +220,29 @@ def read_table(tabfile, *,
 
     return True,tab
 
-
+#vectorized find nearest mass
+#https://stackoverflow.com/questions/8914491/finding-the-nearest-value-and-return-the-index-of-array-in-python
+def find_closest(A, target): #returns index of closest array of A within target
+    #A must be sorted
+    idx = A.searchsorted(target)
+    idx = np.clip(idx, 1, len(A)-1)
+    left = A[idx-1]
+    right = A[idx]
+    idx -= target - left < right - target
+    return idx
 
 def read_formulas(form,charge=None,elements=None): #either a single string or a DataFrame with element columns
 
-#%%
     if type(form)==str: form=parse_form(form)  #single string
     elif  not (isinstance(form, pd.DataFrame) or isinstance(form, pd.Series)): #iterable
         form=pd.concat([parse_form(f) for f in form]).reset_index(drop=True).fillna(0)  
-        
+        form=form.reset_index(drop=True)
     #DataFrame with columns (recommended input)
     elif isinstance(form, pd.DataFrame):        
         if type(elements)==type(None):
             elements=form.columns[form.columns.isin(mono_elmass.index)].tolist()
         form=form[elements]
+    
     
     elements=form.columns.tolist()
     if type(charge)!=type(None):
@@ -216,17 +251,22 @@ def read_formulas(form,charge=None,elements=None): #either a single string or a 
         
     if "-" in elements or "+" in elements:
         z=np.zeros((len(form),1))
-        if "-" in elements: z+=form[:,np.argwhere(np.array(elements)=="-")[0]]
-        if "+" in elements: z+=form[:,np.argwhere(np.array(elements)=="+")[0]]
+        if "-" in elements: z+=form["-"].values #form[:,np.argwhere(np.array(elements)=="-")[0]]
+        if "+" in elements: z+=form["+"].values #form[:,np.argwhere(np.array(elements)=="+")[0]]
         charge=z.flatten().astype(int)        
-        
+
 
     mono_mass=(form*mono_elmass.loc[elements].values).sum(axis=1).values
     rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
     avg_mass=(form[elements]*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1).values
     
+    #pop "+" ,"-" 
+    if "-" in elements: form.pop("-")
+    if "+" in elements: form.pop("+")
+    elements=form.columns.tolist()
+    
     form=form.values.astype(int)
-#%%
+    
     return form,elements,charge,mono_mass,rel_mass,avg_mass
 
 def read_resolution(fwhms,avg_mass): #input is either a file or numeric value
@@ -287,9 +327,21 @@ def fft_lowres(form,
                batch_size=batch_size,
                elements=[],
                ): 
+    #%%
+    # form=parse_form("C6S10Ni-")
+    # elements=form.columns
+    # bins=False
+    # return_borders=False
     
     #read input compositions
-    if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
+    if not len(elements): form,elements,charge,mono_mass,rel_mass,avg_mass=read_formulas(form)
+    else:
+        mono_mass=(form*mono_elmass.loc[elements].values).sum(axis=1).values
+        rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
+        avg_mass=(form[elements]*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1).values
+        elements=list(set(elements)-set(("+","-")))
+        form=form[elements].values
+        
     if return_borders: print("Low resolution fft prediction")
     
     l_iso=tables.set_index("symbol").loc[elements].pivot(columns="delta neutrons",values='Isotopic  Composition').fillna(0)
@@ -308,7 +360,10 @@ def fft_lowres(form,
     l_iso=l_iso.T.sort_index().T
     l_iso=l_iso[l_iso.columns[l_iso.columns>=0].tolist()+l_iso.columns[l_iso.columns<0].tolist()]
     
-    #fft 
+    # #fft 
+    # import time
+    # s=time.time()
+    
     bdfs=[]
     maxns,maxps=[],[]
     forms=np.array_split(form,np.arange(0,len(form),int(batch_size))[1:])
@@ -324,13 +379,14 @@ def fft_lowres(form,
         maxn,maxp=-np.argmax(q[:,::-1],axis=1).max(),np.argmax(q,axis=1).max()
         if maxn<0: bdf=pd.DataFrame(np.hstack([baseline[:,maxn:],baseline[:,:maxp]]),columns=np.arange(maxn,maxp))
         else:      bdf=pd.DataFrame(baseline[:,:maxp],columns=np.arange(maxn,maxp)) 
-        
         if len(isotope_range): #only keep selected isotopes in output
             bdf=bdf.iloc[:,np.round(bdf.columns,0).astype(int).isin(isotope_range)]
         
         bdfs.append(bdf)
         maxns.append(maxn)
         maxps.append(maxp)
+    
+    # print(time.time()-s)
     
     bdfs=pd.concat(bdfs).fillna(0)
     if normalize=="sum": bdfs=bdfs.divide(bdfs.sum(axis=1),axis=0)
@@ -345,8 +401,8 @@ def fft_lowres(form,
 #FFT with resolution
 def fft_highres(form,
                 
-                extend=0.5,
-                dummy=1000,
+                extend=0.5, #replace with peak_fwhm?
+                #dummy=1000,
                 
                 #general arguments
                 peak_fwhm=peak_fwhm,
@@ -357,59 +413,106 @@ def fft_highres(form,
                 pick_peaks=pick_peaks,
                 elements=[],
                 charge=None, #unused
-                
+                packing=packing,
+                mass_shift=mass_shift
                 ): 
 
     #%%
-    #to do: add charge to fft highres|!
-    # form="Ni3S3-"
-    # charge=2
+    # #to do: add charge to fft highres|!
+    # form= ["C6S10Ni-","Ni3S3-"] #"Ni3S3-""C6S10Ni-" #
+    # #form="In2O2-" #"Ni3S3-"
+    # pick_peaks=False #True #False
+    # charge=None #can be positive or negative
     # elements=""
     # extend=0.5
-    # dummy=1000
+    # packing=True #False #True #True #$False #True
+    # #dummy=1000
+    # peak_fwhm=0.000325
+    # min_intensity=1e-6
+    # isotope_range=np.arange(7)
+    # mass_shift=True
+    # # form=test[elements].copy().astype(int)
+    # # elements=form.columns
+    # packing=False
+
     
     ### parse charge
-    if type(charge)!=None:    
-        charge=np.array(charge).reshape(-1,1).flatten()
-        if (len(charge)==1) & (type(form)!=str): charge=np.repeat(charge,len(form))
     if isinstance(form,pd.DataFrame):
-        if type(charge)==None:
+        if type(charge)==type(None):
             if "charge" in form.columns.str.lower():
                 print("charge detected, dividing output masses by charge")
                 charge=form.iloc[:,np.argwhere(form.columns.str.lower()=="charge")[0]].values
+
+    if type(charge)==type(None): charge=1
+    
+        
+    if type(charge)!=type(None):    
+        charge=np.array(charge).reshape(-1,1).flatten()
+        if (len(charge)==1) & (type(form)!=str): charge=np.repeat(charge,len(form))
+
     
     #read input compositions
-    if not len(elements): form,elements,mono_mass,rel_mass,avg_mass=read_formulas(form)
+    if not len(elements): form,elements,charge,mono_mass,rel_mass,avg_mass=read_formulas(form)
+    else:
+        mono_mass=(form*mono_elmass.loc[elements].values).sum(axis=1).values
+        rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
+        avg_mass=(form[elements]*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1).values
+        elements=list(set(elements)-set(("+","-")))
+        form=form[elements].values
+        
     peak_fwhm=read_resolution(peak_fwhm,avg_mass)
-    peak_fwhm/=1.25 #(prevents round-off issues from digitize)
+    peak_fwhm*=charge
+    peak_fwhm/=1.25#(prevents round-off issues from digitize)
     
 
     #determine min number of bins (based on fast fft)
     print("")
     maxn,maxp=fft_lowres(pd.DataFrame(form,columns=elements), 
                          return_borders=True,min_intensity=1e-6) 
-    #iso_bins=np.linspace(maxn-extend,maxp+extend,int(np.round((maxp-maxn)/peak_fwhm.min(),0)))
+    iso_bins=np.hstack([np.linspace(maxn-extend,0,int(abs(np.round((maxn-extend))/peak_fwhm.min()))),
+                        np.linspace(0,maxp+extend,int(np.round((maxp+extend)/peak_fwhm.min())))])
+    iso_bins=np.unique(iso_bins)
     
-    iso_bins=np.hstack([np.linspace(maxn-extend,0,int(np.round(maxn/peak_fwhm.min()))),
-                        np.linspace(0,maxp+extend,int(np.round(maxp/peak_fwhm.min())))])
-    #make sure isobins has zero
+    #digitize to mass resolution
+    imass=tables.set_index("symbol").loc[elements]
+    
+    #packing
+    if packing:
+        be=find_closest(iso_bins,np.arange(maxn,maxp+1)) #cut away from the centers
+        mids=(be[:-1]+np.diff(be)/2).astype(int)
+        ns=imass[~imass['Standard Isotope']] #find max packing window
+        max_spread=abs(maxp//ns["delta neutrons"]*(ns["delta_mass"]-ns["delta neutrons"])).max()/peak_fwhm.min()
+        w=int((np.diff(be).mean()-max_spread*2)/2) 
+        iso_bins=iso_bins[~np.isin(np.arange(len(iso_bins)),(mids.reshape(-1,1)+np.arange(-w,w+1)).flatten())]
+  
+    #padding
     N=len(iso_bins)
     bins=2**math.ceil(math.log2(N))
     pad=bins-N
     
-    #digitize to mass resolution
-    imass=tables.set_index("symbol").loc[elements]
-    imass["col_ix"]=np.digitize(imass.delta_mass.values,iso_bins)   
-    imass=imass.merge(pd.Series(np.arange(len(elements)),index=elements,name="row_ix"),how="left",right_index=True,left_index=True)
+    bi=find_closest(iso_bins,imass.delta_mass.values) #iso bin
+    imass["col_ix"]=bi
     
+    imass=imass.merge(pd.Series(np.arange(len(elements)),index=elements,name="row_ix"),how="left",right_index=True,left_index=True)
+
     #pad and fft shift negative ions
     mi_space=np.zeros([len(elements),bins])
     mi_space[imass["row_ix"].values,imass["col_ix"].values]=imass['Isotopic  Composition']
     m_iso=pd.DataFrame(mi_space,index=elements)
-    m_iso.columns=np.hstack([iso_bins,dummy+np.arange(pad)])
+    m_iso.columns=np.hstack([iso_bins, iso_bins[-1]+np.arange(1,pad+1)*peak_fwhm.min()])          #dummy+np.arange(pad)])
     m_iso=m_iso[m_iso.columns[m_iso.columns>=0].tolist()+m_iso.columns[m_iso.columns<0].tolist()] #zero shift
-    zval=m_iso.columns[np.argmax(m_iso.sum())]
-    
+
+    if mass_shift:
+        bin_error=imass['delta_mass']-iso_bins[bi]
+        er_space=np.zeros([len(elements),bins])
+        er_space[imass["row_ix"].values,bi]=bin_error
+        e_iso=pd.DataFrame(er_space,index=elements)
+        e_iso.columns=np.hstack([iso_bins, iso_bins[-1]+np.arange(1,pad+1)*peak_fwhm.min()])          #dummy+np.arange(pad)])
+        e_iso=e_iso[e_iso.columns[e_iso.columns>=0].tolist()+e_iso.columns[e_iso.columns<0].tolist()] #zero shift
+
+        
+
+ 
     print("")
     print("High resolution fft prediction")
     print("(Warning, hi-res fft only accepts a single fwhm value for now )")
@@ -419,38 +522,73 @@ def fft_highres(form,
     forms=np.array_split(form,np.arange(0,len(form),int(batch_size))[1:])
     for batch,form_batch in enumerate(forms):
         print("batch: "+str(batch))
+
+        if mass_shift:
+            baseline = np.ones(len(form_batch))  #np.array([1.0])
+            conv_error =np.zeros(len(form_batch)) #np.array([0.0])
+            fft_size=len(m_iso.columns)
+            for e in range(len(elements)):
+            
+               fft_prob_total =  np.fft.fft(m_iso.iloc[e,:])**form_batch[:,e].reshape(-1,1)      #fft of this loop
+               fft_error_total = np.fft.fft(m_iso.iloc[e,:]* e_iso.iloc[e,:]) *form_batch[:,e].reshape(-1,1)    #error fft of this loop
+     
+               # Convolve with existing result
+               fft_baseline = np.fft.fft(baseline, fft_size)
+               fft_conv_error = np.fft.fft(baseline * conv_error, fft_size)
         
-        one=np.ones([len(form_batch),bins])*complex(1, 0) 
-        for e in range(len(elements)):
-            one*=np.fft.fft(m_iso.iloc[e,:])**form_batch[:,e].reshape(-1,1)
-        baseline=np.fft.ifft(one).real
+               baseline = np.fft.ifft(fft_baseline * fft_prob_total).real
+               conv_error = np.fft.ifft(fft_conv_error * fft_prob_total + fft_baseline * fft_error_total).real
+               conv_error = np.where(baseline > 1e-15, conv_error / baseline, 0.0) # Normalize errors
         
+        else:
+            
+            one=np.ones([len(form_batch),bins])*complex(1, 0) 
+            for e in range(len(elements)):
+                one*=np.fft.fft(m_iso.iloc[e,:])**form_batch[:,e].reshape(-1,1)
+            baseline=np.fft.ifft(one).real
+            
+
+
         #only keep above treshold
         bdf=pd.DataFrame(baseline,columns=m_iso.columns)
-        bdf.columns=bdf.columns-zval #correct for binshift
+       
+        
+
         
         if len(isotope_range): #only keep selected isotopes in output
-            bdf=bdf.iloc[:,np.round(bdf.columns,0).astype(int).isin(isotope_range)]
-
-        if normalize=="sum": bdf=bdf.divide(bdf.sum(axis=1),axis=0)
-        if normalize=="max": bdf=bdf.divide(bdf.max(axis=1),axis=0)
-        
-        #add normalization to mono
-        
-        bdf[bdf<min_intensity]=0
-        if pick_peaks:
-            x,y=argrelmax(bdf.values,axis=1,mode="wrap")
-            bdfs.append(np.vstack([x,bdf.columns[y],bdf.values[x,y]]).T)
-            #would be more accurate to do integral under peak, but this would be slow
+            q=np.round(bdf.columns,0).astype(int).isin(isotope_range)
+            bdf=bdf.iloc[:,q]
+            if mass_shift: conv_error=conv_error[:,q]
+                
             
-        else: bdfs.append(bdf.iloc[:,np.argwhere(np.any(bdf>0,axis=0))[:,0]])
+
+        if normalize=="sum":  bdf=bdf.divide(bdf.sum(axis=1),axis=0)
+        if normalize=="max":  bdf=bdf.divide(bdf.max(axis=1),axis=0)
+        if normalize=="mono": bdf=bdf.divide(bdf.loc[:,0],axis=0)
+        bdf[bdf<min_intensity]=0
+   
+        if pick_peaks:
+            x,y=argrelmax(bdf.values,axis=1,mode="wrap") #?
+            
+            if mass_shift: bdfs.append(np.vstack([x,bdf.columns[y]+conv_error[x,y],bdf.values[x,y]]).T)    
+            else:          bdfs.append(np.vstack([x,bdf.columns[y],bdf.values[x,y]]).T)
+
+                    
+        else: 
+            keep=np.argwhere(bdf>min_intensity)
+            abundance=bdf.values[keep[:,0],keep[:,1]]
+            mass=bdf.columns[keep[:,1]]
+            if mass_shift: mass+=conv_error[keep[:,0],keep[:,1]] 
+            bdfs.append(np.vstack([keep[:,0],mass,abundance]).T)
         
 
-    if pick_peaks:
-        bdfs=pd.DataFrame(np.vstack(bdfs),columns=["ix","iso_mass","abundance"])
-    else:
-        bdfs=pd.concat(bdfs).fillna(0).T.sort_index().T.reset_index(drop=True)
-        bdfs.columns=np.round(bdfs.columns,4)
+    bdfs=pd.DataFrame(np.vstack(bdfs),columns=["ix","iso_mass","abundance"]).sort_values(by=["ix","iso_mass"])
+    if add_mono: bdfs["iso_mass"]+=mono_mass[bdfs.ix.astype(int)]
+    if correct_charge: bdfs["iso_mass"]/=charge[bdfs.ix.astype(int)]
+    
+    #test
+    # plt.scatter(bdfs.iso_mass,bdfs.abundance)
+    # plt.title(w)
     #%%
     
     return bdfs
@@ -570,9 +708,6 @@ def Precompute_multi(form,elements=None,isotope_range=isotope_range,prune=prune,
     iso_string[q]=""
     
     #return iso_string #test
-    
-
-    
     iso_string=pd.Series(iso_string.sum(axis=1)).astype(str).str.strip(",").values
     kdf["iso_string"]=iso_string
     
@@ -600,6 +735,7 @@ def Precompute_multi(form,elements=None,isotope_range=isotope_range,prune=prune,
     #mapping element counts to earrs
     m_ecounts=[]
     for ie in edf.arr.values:
+        ie=ie.astype(int)
         zm=np.zeros(ie.max()+1,dtype=np.uint16)
         zm[ie]=np.arange(len(ie))
         m_ecounts.append(zm)
@@ -663,6 +799,13 @@ def multi_conv(form,
     # elements=None
     # charge=None
     # peak_fwhm=np.interp(form.input_mass,xres,yres)
+    # #%%
+    # form="C6S10Ni-"
+    # elements=None
+    # charge=1
+    # #peak_fwhm=0.000325
+    # peak_fwhm=0.00048824
+    # convolve="full"
 
     ## parse charge
     if type(charge)==type(None):
@@ -678,12 +821,16 @@ def multi_conv(form,
     ## parse formula   
     if type(elements)==type(None):
         
-        if type(form)==str: form=parse_form(form)  #single string
+        if type(form)==str: form=parse_form(form).reset_index(drop=True)  #single string
         elif  not (isinstance(form, pd.DataFrame) or isinstance(form, pd.Series)): #iterable
             form=pd.concat([parse_form(f) for f in form]).reset_index(drop=True).fillna(0)          
         if isinstance(form, pd.DataFrame): #DataFrame with columns (recommended input)        
             elements=form.columns[form.columns.isin(mono_elmass.index)].tolist()
-            
+    else:
+        mono_mass=(form*mono_elmass.loc[elements].values).sum(axis=1).values
+        rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
+        avg_mass=(form[elements]*rel_mass.groupby(rel_mass.index,sort=False).sum().values.flatten()).sum(axis=1).values
+        
     form=form[elements]
     elements=form.columns.tolist()
 
@@ -702,7 +849,7 @@ def multi_conv(form,
     ## detect index:
     xx=np.arange(len(form))
     if (isinstance(form, pd.DataFrame) or isinstance(form, pd.Series)): xx=form.index
-       
+
     ## calculate mass
     mono_mass=(form*mono_elmass.loc[elements].values).sum(axis=1).values
     rel_mass=tables.set_index("symbol").loc[elements,["Relative Atomic Mass",'Isotopic  Composition']].prod(axis=1)
@@ -727,8 +874,6 @@ def multi_conv(form,
                                                                                isotope_range=isotope_range,
                                                                                prune=prune,
                                                                                min_chance=min_chance)
-    
-    
             
     #### 3. Predict #####
     res_ixs=[]
@@ -741,13 +886,6 @@ def multi_conv(form,
         
         qf=np.argwhere(uri==ixr)[:,0]
         bf=form[qf]
-        
-        # #%% test
-        # for eix,e in enumerate(earrs):
-        #     if len(earrs[eix]):
-        #         earrs[eix][m_ecounts[eix][bf[:,eix]]]
-        
-    
    
         chances=np.hstack([earrs[eix][m_ecounts[eix][bf[:,eix]]]  for eix,e in enumerate(earrs) if len(earrs[eix])])
         chances[chances<min_chance]=0
@@ -769,14 +907,29 @@ def multi_conv(form,
     multi_df=pd.DataFrame(np.vstack(multi_preds),columns=["mass","abundance","isotope"])
     multi_df.index=np.repeat(np.arange(len(form)),[len(i) for i in multi_preds])
     multi_df["isotope"]=kdf.loc[multi_df["isotope"].astype(int),"iso_string"].values
-    
+
+
     if normalize=="mono": multi_df["abundance"]/=multi_df.loc[multi_df.mass==0,"abundance"].loc[multi_df.index]
     
-    if type(charge)!=type(None):
-        multi_df["mass"]/=charge[multi_df.index]
+    # if type(charge)!=type(None):
+    #     multi_df["mass"]/=charge[multi_df.index]
+    #%%
+    if convolve=="fast": multi_df=convolve_fast(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch,verbose=verbose,charge=charge)
+    if convolve=="full": multi_df=convolve_full(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch,verbose=verbose,charge=charge)
+    if not convolve:
         
-
-    if convolve: multi_df=convolve_gauss(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch,verbose=verbose,charge=charge)
+        #add isotope
+        if type(charge)!=type(None): 
+            multi_df["charge"]=charge[multi_df.index.values]
+            #comb["isotope"]*=charge[comb.index] 
+        else:
+            multi_df["charge"]=1
+        
+        if add_mono:       multi_df.mass+=mono_mass[multi_df.index.values]
+        if correct_charge: multi_df.mass/=multi_df.charge
+        
+        
+    
     if normalize=="sum": multi_df["abundance"]=multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("sum")
     if normalize=="max": multi_df["abundance"]=multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("max")
 
@@ -787,7 +940,91 @@ def multi_conv(form,
 
 #%%
 
-def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convolve_batch,verbose=verbose,charge=None):
+def convolve_full(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convolve_batch,verbose=verbose,charge=None):
+    
+    #%%
+    
+    
+    #add min abundance
+    
+    multi_df["isotope"]=multi_df.mass.round(0).astype(int)
+    multi_df["zmass"]=multi_df["mass"]-multi_df["isotope"]
+    multi_df["peak_fwhm"]=peak_fwhm[multi_df.index]
+    
+    ui=np.unique(multi_df.index)
+    if convolve_batch: batch_groups=[ui[i:i+int(convolve_batch)] for i in range(0,len(ui),int(convolve_batch))]
+    else: batch_groups=[ui]
+    
+    #if w> points_r- points_l (weighted mean)
+    #if points  >2 (convolve on grid)
+    #place outer most points on outside
+    res=[]
+    for batch,b in enumerate(batch_groups):
+        if verbose: print("batch: "+str(batch))
+
+        #read group
+        g=multi_df.loc[b,:]        
+         
+        gx=np.vstack([g.index,g.isotope.values]).T
+        gs=np.hstack([0,np.argwhere(~(gx[1:]==gx[:-1]).all(axis=1))[:,0]+1,len(gx)])
+        g["row"]=np.repeat(np.arange(len(gs)-1),np.diff(gs))
+        g["minmass"]=g.groupby("row")["zmass"].transform("min")
+        g["cmass"]=g["zmass"]-g["minmass"]
+        mdelt=g.cmass.max()
+        
+        fwhms=g.groupby(g.index)["peak_fwhm"].nth(0)
+        ufwhms=np.unique(fwhms)
+        minsigma=ufwhms[0]
+
+        #constructing gaussian space
+        l,u=-g.peak_fwhm.min(),mdelt+g.peak_fwhm.max()
+        x=np.linspace(l,u,(int(np.round((u-l)/minsigma))*divisor))
+        ycors=find_closest(x,g.cmass) 
+
+        xcors=g.row
+        zmat=coo_matrix((g.abundance, (xcors, ycors))).toarray()
+         
+        #convolve with gaussian (Gaussian FWHM=2*sqrt(2ln(2)) =~ 2.355*s ) (so sigma is fwhm/2.355)
+        if len(ufwhms)==1: 
+            sig=divisor/2.355
+            gmat=gaussian_filter1d(zmat,sigma=sig,mode="constant",cval=0.0)*sig*np.sqrt(2*np.pi)
+        else:               
+            
+            sigs=divisor*ufwhms/minsigma/2.355
+            gmat=[gaussian_filter1d(zmat[ix],sigma=sigs[ix],mode="constant",cval=0.0)*sigs[ix]*np.sqrt(2*np.pi) #* divisor*2.355*i/minsigma  
+                                  for ix,i in enumerate(fwhms)]
+        
+        keep=np.argwhere(gmat>min_intensity)
+        i=gmat[gmat>min_intensity] #abundance
+        m=g.groupby("row")[["isotope","minmass"]].nth(0).values.sum(axis=1)[keep[:,0]]+x[keep[:,1]]             #mass
+        ix=g.groupby("row").nth(0).index[keep[:,0]]
+        
+        res.append(np.vstack([ix,m,i]).T)
+
+    res=pd.DataFrame(np.vstack(res),columns=["ix","mass","abundance"])
+    res["ix"]=res["ix"].astype(int)
+    res["isotope"]=res["mass"].round(0).astype(int)
+    
+    #add isotope
+    if type(charge)!=type(None): 
+        res["charge"]=charge[res["ix"].values]
+        #comb["isotope"]*=charge[comb.index] 
+    else:
+        res["charge"]=1
+    
+
+    if add_mono:       res.mass+=mono_mass[res["ix"].values]
+    if correct_charge: res.mass/=res.charge
+    
+    res=res.set_index("ix")
+    
+    #%%
+    return res
+
+#%%
+
+
+def convolve_fast(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convolve_batch,verbose=verbose,charge=None):
 #%%
 
     
@@ -814,7 +1051,7 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convol
     q=np.in1d(multi_df.gx,nc)
     nocon,con=multi_df[q],multi_df[~q]
     
-    #%%
+
     if len(nocon):
         comb.append(nocon[["mass","abundance","gx"]])
     
@@ -838,6 +1075,7 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convol
             wmg=wms.groupby("gx")[["wa","abundance"]].sum()
             wmeans=wmg["wa"]/wmg["abundance"]
             
+
             #calculate the amplitude at weighted mean
             wams=[]
             s=wms.groupby("gx").size().to_frame("sz") #groupby size, pivot and vectorize
@@ -848,10 +1086,18 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convol
                 rots=gx.peak_fwhm.values.reshape(-1,n)/2.355
                 mu=wmeans.loc[gs.index].values #,n)
                 mu=np.tile(mu.reshape(-1,1),(1,n))
-                wams.append(pd.Series((rota * np.exp(-0.5 * ((mu - rotm)/rots)**2)).sum(axis=1),index=gs.index))
+                #wams.append(pd.Series((rota * np.exp(-0.5 * ((mu - rotm)/rots)**2)).sum(axis=1),index=gs.index))
+                wams.append(pd.Series((rota*np.exp(-((mu-rotm)**2)/(2*rots**2))).sum(axis=1),index=gs.index))
+
+                
+
             wams=pd.concat(wams).sort_index()
-            
             wmd=pd.concat([wmeans,wams],axis=1).reset_index()
+            
+         
+            # #this should actually just be the sum! or not?
+            # wmd=pd.concat([wmeans,wmg["abundance"]],axis=1).reset_index()
+            
             wmd.columns=["gx","mass","abundance"]
             comb.append(wmd)
         
@@ -869,44 +1115,38 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convol
         res=[]
         for batch,b in enumerate(batch_groups):
             if verbose: print("batch: "+str(batch))
-    
-    
+
             #read group
             g=pp.loc[b,:]        
              
             fwhms=g.groupby(g.index)["peak_fwhm"].nth(0)
             cm=g.mass #centered mass
             ufwhms=np.unique(fwhms)
-            minsigma=ufwhms[0]/2.355
+            minsigma=ufwhms[0]
     
-            
             #constructing gaussian space
             l,u=0,cm.max()
             x=np.linspace(l,u,(int(np.round((u-l)/minsigma))*divisor))
-            ycors=np.digitize(cm,x)-1
-            
-            gu,gui=np.unique(g.index,return_index=True) #sorting error
+            ycors=find_closest(x,cm.values) 
+            gu,gui=np.unique(g.index,return_index=True) 
             zms=g.iloc[gui].zm.values
-            xcors=np.digitize(g.index,gu)-1 #xcors are wrong?
+            xcors=find_closest(gu,g.index) 
             zmat=coo_matrix((g.abundance, (xcors, ycors))).toarray()
-            
-            #convolve with gaussian (Gaussian FWHM=2*sqrt(2ln(2)) =~ 2.355*s )
-            #if len(ufwhms)==1: gmat=gaussian_filter1d(zmat,sigma=divisor/2.355)*divisor 
-            if len(ufwhms)==1:  gmat=gaussian_filter1d(zmat,sigma=divisor,                mode="constant",cval=0.0) * divisor*2.355 
-            else:               gmat=[gaussian_filter1d(zmat[ix],sigma=divisor*i/minsigma,mode="constant",cval=0.0) * divisor*2.355*i/minsigma  
+             
+            #convolve with gaussian (Gaussian FWHM=2*sqrt(2ln(2)) =~ 2.355*s ) (so sigma is fwhm/2.355)
+            if len(ufwhms)==1: 
+                sig=divisor/2.355
+                gmat=gaussian_filter1d(zmat,sigma=sig,mode="constant",cval=0.0)*sig*np.sqrt(2*np.pi)
+            else:               
+                
+                sigs=divisor*ufwhms/minsigma/2.355
+                gmat=[gaussian_filter1d(zmat[ix],sigma=sigs[ix],mode="constant",cval=0.0)*sigs[ix]*np.sqrt(2*np.pi) #* divisor*2.355*i/minsigma  
                                       for ix,i in enumerate(fwhms)]
-            
-            #test
-            # for i in range(len(gmat)):
-            #     fig,ax=plt.subplots()
-            #     plt.plot(gmat[i])
-            #     plt.plot(zmat[i])
-            
+
             #pick peaks
             gmat=np.hstack([np.zeros(len(gmat)).reshape(-1,1),gmat,np.zeros(len(gmat)).reshape(-1,1)]) #pad 
             px,py=argrelmax(gmat,axis=1)
-    
-    
+
             m=x[py-1]+zms[px]          #mass
             a=gmat[px,py]              #abundances
             i=gu[px] #g.index[gui].values[px] #index
@@ -928,12 +1168,14 @@ def convolve_gauss(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convol
     comb["isotope"]=comb.mass
     if type(charge)!=type(None): 
         comb["charge"]=charge[comb.index] 
-        comb["isotope"]*=charge[comb.index] 
+        #comb["isotope"]*=charge[comb.index] 
+    else:
+        comb["charge"]=1
     comb["isotope"]=comb["isotope"].round(0).astype(int)    
     
-    
-    comb["mass"]+=mono_mass[comb.index]
-    
+    if add_mono:       comb["mass"]+=mono_mass[comb.index]
+    if correct_charge: comb["mass"]/=comb["charge"]
+ 
     
     comb=comb.sort_values(by=["gx","mass"])
     comb.pop("gx")
@@ -990,6 +1232,7 @@ if not os.path.exists(isotope_table):
 else:
     
     tables=pd.read_csv(isotope_table,sep="\t")
+    
 
 #add electron gain/loss
 emass = 0.000548579909  # electron mass
@@ -1003,7 +1246,7 @@ tables["Standard Isotope"]=tables["Standard Isotope"].astype(bool)
 mono_elmass=tables[tables["Standard Isotope"]].set_index("symbol")["Relative Atomic Mass"]
 all_elements=list(set(tables.symbol))
 
-
+#construct mdf
 
 
 #%% Load input data
@@ -1047,7 +1290,7 @@ if __name__=="__main__":
     
         elements=fdf.columns[fdf.columns.isin(tables.symbol)]
         form=fdf[elements]
-        
+        res=fft_lowres (form)
         if method=="fft":         res=fft_lowres (form)
         if method=="fft_hires":   res=fft_highres(form,peak_fwhm=peak_fwhms[cix])
         if method=="multi":       res=multi_conv( form,peak_fwhm=peak_fwhms[cix])

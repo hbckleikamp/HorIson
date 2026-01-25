@@ -810,7 +810,7 @@ def multi_conv(form,
     # form=b
     # precomp=precomputed
     # elements=mf_elements
-    # charge=None
+    #charge=None
 
 
     ## parse charge
@@ -919,7 +919,7 @@ def multi_conv(form,
     
     # if type(charge)!=type(None):
     #     multi_df["mass"]/=charge[multi_df.index]
-    #%%
+
     if convolve=="fast": multi_df=convolve_fast(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch,verbose=verbose,charge=charge)
     if convolve=="full": multi_df=convolve_full(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch,verbose=verbose,charge=charge)
     if not convolve:
@@ -1145,7 +1145,7 @@ def convolve_fast(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convolv
                 gmat=gaussian_filter1d(zmat,sigma=sig,mode="constant",cval=0.0)*sig*np.sqrt(2*np.pi)
             else:               
                 
-                sigs=divisor*ufwhms/minsigma/2.355
+                sigs=divisor*fwhms.values/minsigma/2.355
                 gmat=[gaussian_filter1d(zmat[ix],sigma=sigs[ix],mode="constant",cval=0.0)*sigs[ix]*np.sqrt(2*np.pi) #* divisor*2.355*i/minsigma  
                                       for ix,i in enumerate(fwhms)]
 

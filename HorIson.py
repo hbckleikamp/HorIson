@@ -414,7 +414,9 @@ def fft_highres(form,
                 elements=[],
                 charge=None, #unused
                 packing=packing,
-                mass_shift=mass_shift
+                mass_shift=mass_shift,
+                correct_charge=correct_charge,
+                add_mono=add_mono
                 ): 
 
     #%%
@@ -584,7 +586,7 @@ def fft_highres(form,
 
     bdfs=pd.DataFrame(np.vstack(bdfs),columns=["ix","iso_mass","abundance"]).sort_values(by=["ix","iso_mass"])
     if add_mono: bdfs["iso_mass"]+=mono_mass[bdfs.ix.astype(int)]
-    if correct_charge: bdfs["iso_mass"]/=charge[bdfs.ix.astype(int)]
+    if correct_charge: bdfs["iso_mass"]=charge[bdfs.ix.astype(int)]
     
     #test
     # plt.scatter(bdfs.iso_mass,bdfs.abundance)
@@ -767,6 +769,8 @@ def multi_conv(form,
                Precomputed=Precomputed,
                verbose=verbose,
 
+               correct_charge=correct_charge,
+               add_mono=add_mono
                #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
                
                ): 
@@ -811,6 +815,16 @@ def multi_conv(form,
     # precomp=precomputed
     # elements=mf_elements
     #charge=None
+    
+    # form="C6S10Ni-"
+    # peak_fwhm=0.00232 #58808
+    # elements=None
+    # convolve="full"#False
+    
+    # form=mf
+    # elements=mf_elements
+    # peak_fwhm=np.interp(mf.input_mass,xres,yres)
+    # Precomputed=precomp
 
 
     ## parse charge
@@ -916,7 +930,7 @@ def multi_conv(form,
 
 
     if normalize=="mono": multi_df["abundance"]/=multi_df.loc[multi_df.mass==0,"abundance"].loc[multi_df.index]
-    
+   
     # if type(charge)!=type(None):
     #     multi_df["mass"]/=charge[multi_df.index]
 
@@ -930,10 +944,11 @@ def multi_conv(form,
             #comb["isotope"]*=charge[comb.index] 
         else:
             multi_df["charge"]=1
-        
-        if add_mono:       multi_df.mass+=mono_mass[multi_df.index.values]
+
         if correct_charge: multi_df.mass/=multi_df.charge
-        
+        if add_mono:       multi_df.mass+=mono_mass[multi_df.index.values]    
+            
+
         
     
     if normalize=="sum": multi_df["abundance"]=multi_df["abundance"]/multi_df.groupby(multi_df.index)["abundance"].transform("sum")
@@ -1018,9 +1033,9 @@ def convolve_full(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convolv
     else:
         res["charge"]=1
     
-
-    if add_mono:       res.mass+=mono_mass[res["ix"].values]
     if correct_charge: res.mass/=res.charge
+    if add_mono:       res.mass+=mono_mass[res["ix"].values]
+
     
     res=res.set_index("ix")
     
@@ -1068,47 +1083,66 @@ def convolve_fast(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convolv
         cong=np.hstack([0,np.argwhere(con.gx.values[:-1]!=con.gx.values[1:])[:,0]+1,len(con)]) #find groups
         conl,conr=con.mass.iloc[cong[:-1]],con.mass.iloc[cong[1:]-1]                           #compute borders
         con.loc[:,"zm"]=np.repeat(conl,np.diff(cong))                                          #add zero mass
-        wd=(conr-conl)<(con.peak_fwhm.iloc[cong[:-1]])                                         #width check
-        wd=wd | (np.diff(cong)==2)                                                             #if group == 2 also weighted mean
-        wmq=np.in1d(con.gx,con.gx.values[cong[np.argwhere(wd)[:,0]]])                          #divide groups
-        wms=con[wmq]
+        
+
+        
+        # wd=(conr-conl)<(con.peak_fwhm.iloc[cong[:-1]])                                         #width check
+        # wd=wd | (np.diff(cong)==2)                                                             #if group == 2 also weighted mean
+        # wmq=np.in1d(con.gx,con.gx.values[cong[np.argwhere(wd)[:,0]]])                          #divide groups
+        # wms=con[wmq]
+        
+                                
+        # from scipy.optimize import brentq
+        # def dfdx(x):
+        #     return (a1*(x-x1)*np.exp(-(x-x1)**2/(2*s1**2))
+        #           + a2*(x-x2)*np.exp(-(x-x2)**2/(2*s2**2)))
         
     
-        #calculate weighted mean
+        # #calculate weighted mean
     
-        if len(wms):
-            wms.loc[:,"wa"]=wms["mass"]*wms["abundance"]
-            wmg=wms.groupby("gx")[["wa","abundance"]].sum()
-            wmeans=wmg["wa"]/wmg["abundance"]
+        # if len(wms):
+        #     wms.loc[:,"wa"]=wms["mass"]*wms["abundance"]
+        #     wmg=wms.groupby("gx")[["wa","abundance"]].sum()
+        #     wmeans=wmg["wa"]/wmg["abundance"]
             
 
-            #calculate the amplitude at weighted mean
-            wams=[]
-            s=wms.groupby("gx").size().to_frame("sz") #groupby size, pivot and vectorize
-            for n,gs in s.groupby("sz"):
-                gx=wms[wms.gx.isin(gs.index)]
-                rotm=gx.mass.values.reshape(-1,n)
-                rota=gx.abundance.values.reshape(-1,n)
-                rots=gx.peak_fwhm.values.reshape(-1,n)/2.355
-                mu=wmeans.loc[gs.index].values #,n)
-                mu=np.tile(mu.reshape(-1,1),(1,n))
-                #wams.append(pd.Series((rota * np.exp(-0.5 * ((mu - rotm)/rots)**2)).sum(axis=1),index=gs.index))
-                wams.append(pd.Series((rota*np.exp(-((mu-rotm)**2)/(2*rots**2))).sum(axis=1),index=gs.index))
-
+        #     #calculate the amplitude at weighted mean
+        #     wams=[]
+        #     s=wms.groupby("gx").size().to_frame("sz") #groupby size, pivot and vectorize
+        #     for n,gs in s.groupby("sz"):
+        #         gx=wms[wms.gx.isin(gs.index)]
+        #         rotm=gx.mass.values.reshape(-1,n)
+        #         rota=gx.abundance.values.reshape(-1,n)
+        #         rots=gx.peak_fwhm.values.reshape(-1,n)/2.355
+          
+        #         #root finding instead of weighted mean
+        #         mu=np.zeros(len(rots))
+        #         for rx,r in enumerate(np.hstack([rota,rotm,rots])):
+        #             a1,a2,x1,x2,s1,s2=r
+        #             mu[rx]=brentq(dfdx, x1, x2)
+    
+                    
                 
+                
+        #         #mu=wmeans.loc[gs.index].values #,n)
+        #         mu=np.tile(mu.reshape(-1,1),(1,n))
+        #         #wams.append(pd.Series((rota * np.exp(-0.5 * ((mu - rotm)/rots)**2)).sum(axis=1),index=gs.index))
+        #         wams.append(pd.Series((rota*np.exp(-((mu-rotm)**2)/(2*rots**2))).sum(axis=1),index=gs.index))
 
-            wams=pd.concat(wams).sort_index()
-            wmd=pd.concat([wmeans,wams],axis=1).reset_index()
+        #     wams=pd.concat(wams).sort_index()
+        #     wmd=pd.concat([wmeans,wams],axis=1).reset_index()
             
          
-            # #this should actually just be the sum! or not?
-            # wmd=pd.concat([wmeans,wmg["abundance"]],axis=1).reset_index()
+        #     # #this should actually just be the sum! or not?
+        #     # wmd=pd.concat([wmeans,wmg["abundance"]],axis=1).reset_index()
             
-            wmd.columns=["gx","mass","abundance"]
-            comb.append(wmd)
+        #     wmd.columns=["gx","mass","abundance"]
+        #     comb.append(wmd)
         
-        #the remaining points need to be convolved using a grid
-        pp=con[~wmq].sort_values(by="peak_fwhm").set_index("gx")
+        # #the remaining points need to be convolved using a grid
+        # pp=con[~wmq].sort_values(by="peak_fwhm").set_index("gx")
+        
+        pp=con.sort_values(by="peak_fwhm").set_index("gx")
         pp["mass"]-=pp["zm"]
         
         ui=np.unique(pp.index)
@@ -1179,8 +1213,9 @@ def convolve_fast(multi_df,peak_fwhm,mono_mass,divisor=10,convolve_batch=convolv
         comb["charge"]=1
     comb["isotope"]=comb["isotope"].round(0).astype(int)    
     
-    if add_mono:       comb["mass"]+=mono_mass[comb.index]
     if correct_charge: comb["mass"]/=comb["charge"]
+    if add_mono:       comb["mass"]+=mono_mass[comb.index]
+
  
     
     comb=comb.sort_values(by=["gx","mass"])

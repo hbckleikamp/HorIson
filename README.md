@@ -1,35 +1,64 @@
 # HorIson
 
-# CartMFP
-
-CartMFP or Cartesian molecular formula prediction, is a python tool that can perform molecular formula predictions on custom databases.
+HorIson is a tool for vectorized isotope simulation, that applies Fast-fourier transform (FFT) or multinomial products.
 <br>
 
-#### How does CartMFP work
+#### How does HorIson work
 
-CartMFP consists of two steps.
-1. Constructing a database *space2cart.py* : A local database is constructed. <br>
-2. Molecular formula prediction *cart2form.py* : Molecular formulas that are predicted based on input masses. <br> <br>
+HorIson provides 3 algorithms for different types of istope simulation.
+1. FFT_Lowres, which computes convolved coarse isotopes (1 per 1 Da) at high speed.
+2. FFT_Highres, which computes fine isotopes and profile spectra at variable resolution.
+3. Multi_conv: which computes separate isotope combinstions at high speed. <br> <br>
 
+To enable vectorization for FFT-based algorithms, isotope masses are placed on a uniform grid.
+For multinomial products, global isotope combinations and multnomial distribtuions are precomputed.
 
-# 1. Constructing a database
+#### Usage:
+HorIson can be imported as a module, or called from the command line.
+As input for each algorithm, a failepath to a tabular can be supplied, or an element string, or a DataFrame or array can be used when importing as a module.
+When no header information is present, the element order should be supplied with the element parameter.
 
-A database is constructed by enumerating all combinations of elements within a certain range.
-The compositional space is described with a specific syntax: Element[min,max].
-This can be any element in the periodic table for which the monoisotopic mass is described in the NIST database.
-"H[200]C[75]N[50]O[50]P[10]S[10]" is used default elemental space.
-This would eqaute to 0-200 Hydrogen, 0-75 Carbon, 0-50 Nitrogen, etc. 
+# Arguments.
 
-Apart from max element constraints, the elemental composition space is further limited by the maximum mass `max_mass` and ring double bond equivalents (RDBE) `min_rdbe`,`max_rdbe`.
+## 1. FFT_Lowres specific arguments
 
-Base chemical constraints:
 |Parameter           | Default value     |       Description|
 |-----------------|:-----------:|---------------|
-|-composition| "H[200]C[75]N[50]O[50]P[10]S[10]" | composition string describing minimum and maximum element counts|
-|-max_mass| 1000 | maximum mass (Da)|
-|-min_rdbe | -5 | minimum RDBE |
-|-max_rdbe| 80 | maximum RDBE |
+|bins| | |
 
+elements
+min_intensity
+isotope_range
+normalize False
+batch_size
+add_mono
+
+
+## 1. FFT_Lowres specific arguments
+
+
+
+
+|Parameter           | Default value     |       Description|
+|-----------------|:-----------:|---------------|
+|bins| | |
+
+mass_calc
+
+
+
+               bins=False,
+               return_borders=False,
+               
+               
+               #general arguments
+               min_intensity=min_intensity,
+               isotope_range=isotope_range,
+               normalize=normalize,
+               batch_size=batch_size,
+               elements=[],
+               mass_calc=True,
+               add_mono=True
 
 Additional chemical constraints are provided by implementing some of Fiehn's 7 Golden rules, which filters unrealistic or impossible compositions.
 This can drastically reduce the size of your composition space. These include:  Rule #2 – LEWIS and SENIOR check; Rule #4 – Hydrogen/Carbon element ratio check; Rule #5 heteroatom ratio check and Rule #6 – element probability check.

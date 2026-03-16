@@ -20,65 +20,48 @@ When no header information is present, the element order should be supplied with
 
 # Arguments.
 
-## 1. FFT_Lowres specific arguments
+## General arguments
 
 |Parameter           | Default value     |       Description|
 |-----------------|:-----------:|---------------|
-|bins| | |
-
-elements
-min_intensity
-isotope_range
-normalize False
-batch_size
-add_mono
-
-
-## 1. FFT_Lowres specific arguments
+|elements|[] | Specifies element column order if a headerless array is used as input |
+|min_itensity|1e-6|Filters isotopes in output below a certain probability level|
+|isotope_ranges|[-2,6]|Filters isotopes in output to a certain mass range|
+|charge|1| charge of computed formulas, accepts either single value or array of different charges  |
+|normalize|False|Normalizes probabilies either total ("sum"), largest isotope ("max") or monoisotopic peak ("mono") |
+|batch_size|1e4|How many formulas to simulate at once|
+|add_mono|True|Add monoisotopic mass back to simluated isotope masses|
+|peak_fwhm|0.01|Peak FWHM in Da, used for generating profile data (FFT_Highres, Multi_conv), accepts either single value or array of different FWHMs |
+|divisor|4|Subsampling rate for convolution (FFT_Highres, Multi_conv) | 
 
 
+## FFT_Lowres specific arguments
 
 
 |Parameter           | Default value     |       Description|
 |-----------------|:-----------:|---------------|
-|bins| | |
+|bins| False| Set a fixed maximum grid size |
+|mass_calc| True| Calculate exact isotope masses|
+|return_borders|False| provide grid-sizes as output|
 
-mass_calc
 
-
-
-               bins=False,
-               return_borders=False,
-               
-               
-               #general arguments
-               min_intensity=min_intensity,
-               isotope_range=isotope_range,
-               normalize=normalize,
-               batch_size=batch_size,
-               elements=[],
-               mass_calc=True,
-               add_mono=True
-
-Additional chemical constraints are provided by implementing some of Fiehn's 7 Golden rules, which filters unrealistic or impossible compositions.
-This can drastically reduce the size of your composition space. These include:  Rule #2 – LEWIS and SENIOR check; Rule #4 – Hydrogen/Carbon element ratio check; Rule #5 heteroatom ratio check and Rule #6 – element probability check.
+## FFT_Highres specific arguments
 
 |Parameter           | Default value     |       Description|
 |-----------------|:-----------:|---------------|
-|-filt_7gr| True | Toggle global to apply or remove 7 golden rules filtering|
-|-filt_LewisSenior| True | Golden Rule  #2:   Filter compositions with non integer dbe (based on max valence) |
-|-filt_ratios | "HC[0.1,6]FC[0,6]ClC[0,2]BrC[0,2]NC[0,4]OC[0,3]PC[0,2]SC[0,3]SiC[0,1]" | #Golden Rules #4,5: Filter on chemical ratios with extended range 99.9% coverage |
-|-filt_NOPS| True    | #6 – element probability check. |
+|packing| True|  Compress redundant grid sections |
+|peak_picking|True| Output centroid data |
 
-Additional arguments can be supplied to affect the performance and output paths: 
+## Mutli_conv specific arguments
 
 |Parameter           | Default value     |       Description|
 |-----------------|:-----------:|---------------|
-|-maxmem | 10e9 |  Amount of memory used in bytes |
-|-mass_blowup | 100000 |blowup factor to convert float masses to integers|
-|-write_mass  | True | construct a mass lookup table (faster MFP but larger database)|
-|-Cartesian_output_folder | "Cart_Output" | Path to output folder |
-|-Cartesian_output_file   |<depends on parameters> | Output database name |
+|prune| 1e-6|  remove isotope combinations below a chance threshold or outside of isotope range |
+|min_chance| 1e-4| remove isotope combinations after pruning |
+|convolve|"fast"| Output raw combinations (False) or profile (peak) data ("full") or centroid data ("fast")
+|add_borders|False|Compute peak borders|
+|add_area| False| Compute peak area|
+|Precomputed|[]|Re-use precomputed isotope combinations |
 
 
 

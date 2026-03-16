@@ -66,7 +66,7 @@ When no header information is present, the element order should be supplied with
 
 
 
-#### Licensing
+#### Licensing:
 
 The pipeline is licensed with standard MIT-license. <br>
 If you would like to use this pipeline in your research, please cite the following papers: 

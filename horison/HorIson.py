@@ -271,9 +271,13 @@ def read_formulas(form,charge=charge,elements=elements): #either a single string
             if np.all(form["-"]==1): form["-"]*=charge
         if "+" in elements: 
             if np.all(form["+"]==1): form["+"]*=charge
-            
+    
     ## calculate mass
     mono_mass=(form[elements]*mono_elmass.loc[elements].values).sum(axis=1).values
+    
+    #pop +,- from formulas
+    elements=[i for i in elements if i not in ["+","-"]]
+    form=form[elements]
     
     #%%
     return form,elements,charge,mono_mass#,rel_mass,avg_mass
@@ -337,16 +341,16 @@ def fft_lowres(form,
                elements=[],
                mass_calc=mass_calc,
                add_mono=add_mono,
+               correct_charge=correct_charge,
                charge=charge
                ): 
 
     #%%
     
+
+    
     # #read input compositions
     form,elements,charge,mono_mass=read_formulas(form)
-
-
-
 
 
     #shift isotope table
@@ -443,7 +447,7 @@ def fft_lowres(form,
             maxns.append(qmaxn)
             maxps.append(qmaxp)
             continue
-        #%%
+     
         if len(isotope_range): #only keep selected isotopes in output
             baseline=baseline.loc[:,baseline.columns[baseline.columns.isin(isotope_range)]]
             
@@ -464,21 +468,19 @@ def fft_lowres(form,
 
     q=[True]
     if min_intensity>0: 
-        q=bdfs>min_intensity
+        q=(bdfs>min_intensity).values
     
         
         
     if mass_calc:      
         iso_masses=pd.concat(iso_masses).fillna(0)
         #combine outputs
-
-        
-        
-        if add_mono: iso_masses+=mono_mass.reshape(-1,1)
+        if add_mono:       iso_masses+=mono_mass.astype(float).reshape(-1,1)
+        if correct_charge: iso_masses/=charge.reshape(-1,1)  
         
         if min_intensity>0: 
             ii=iso_masses.values[q].round(0).astype(int)
- 
+ #%%
             return pd.DataFrame(np.vstack([bdfs.index[np.argwhere(q)[:,0]], 
                               iso_masses.values[q],
                               bdfs.values[q],
@@ -729,7 +731,7 @@ def fft_highres(form,
 
     bdfs=pd.DataFrame(np.vstack(bdfs),columns=["ix","iso_mass","abundance"]).sort_values(by=["ix","iso_mass"])
   
-    if add_mono: bdfs["iso_mass"]+=mono_mass[bdfs.ix.astype(int)]
+    if add_mono: bdfs["iso_mass"]+=mono_mass[bdfs.ix.astype(int)].astype(float)
     if correct_charge: bdfs["iso_mass"]/=charge[bdfs.ix.astype(int)] #divide or multiply
     #%%
     return bdfs.sort_index()
@@ -905,7 +907,9 @@ def multi_conv(form,
                verbose=verbose,
 
                correct_charge=correct_charge,
-               add_mono=add_mono
+               add_mono=add_mono,
+               add_borders=add_borders,
+               add_area=add_area
                #min_chance=1e-6,prune=1e-6, convolve=False,isotope_range=np.arange(-2,7)
                
                ): 
@@ -1036,7 +1040,7 @@ def multi_conv(form,
         ws["mass"]=ws["wa"]/ws["abundance"]
         multi_df=ws.set_index("index")[["mass","abundance","isotope"]]
              
-    if convolve=="fast": multi_df=convolve_fast(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch,verbose=verbose,charge=charge)
+    if convolve=="fast": multi_df=convolve_fast(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch,verbose=verbose,charge=charge,add_borders=add_borders,add_area=add_area)
     if convolve=="full": multi_df=convolve_full(multi_df,peak_fwhm,mono_mass,convolve_batch=convolve_batch,verbose=verbose,charge=charge)
 
     print("Convolution time: "+str(time.time()-s))

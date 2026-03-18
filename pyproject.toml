@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "HorIson"
+version = "0.1.2"
+description = "HorIson: tools for isotope simulation"
+readme = "README.md"
+requires-python = ">=3.8"
+
+# -------- dependencies --------
+dependencies = [
+    "numpy==2.3.5",
+    "pandas==2.3.3",
+    "scipy==1.16.3",
+]
+
+[project.scripts]
+horison = "horison.HorIson:main"
+
+
+# -------- package data --------
+[tool.setuptools.package-data]
+"horison" = [
+    "CartMFP_test_mass_CASMI2022.tsv",
+    "isotope_table.tsv",
+]
+
+
+
+[tool.setuptools]
+packages = ["horison"]
+include-package-data = true
